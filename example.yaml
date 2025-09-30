@@ -1,0 +1,19 @@
+binutils:
+  source:
+    type: git
+    url: file:///path/to/binutils
+  dependencies: []
+  build_params: ["-D", "release=1"]
+
+gcc:
+  source:
+    type: git  
+    url: file:///path/to/gcc
+  dependencies: ["binutils"]
+  build_params: ["--with-multilib"]
+
+glibc:
+  source:
+    type: srpm
+    path: "/path/to/glibc.src.rpm"
+  dependencies: ["gcc", "binutils"]
