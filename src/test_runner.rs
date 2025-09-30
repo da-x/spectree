@@ -17,7 +17,7 @@ fn setup_git_repo(temp_dir: &Path, package_name: &str, spec_content: &str) -> Re
     // Initialize git repo
     debug!("Initializing git repo at: {}", repo_path.display());
     let shell = Shell::new(&repo_path);
-    shell.run("git init")?;
+    shell.run_sync("git init")?;
 
     // Create spec file
     let spec_path = repo_path.join(format!("{}.spec", package_name));
@@ -32,15 +32,15 @@ fn setup_git_repo(temp_dir: &Path, package_name: &str, spec_content: &str) -> Re
 
     // Create tarball
     debug!("Creating tarball for {}", package_name);
-    shell.run(&format!(
+    shell.run_sync(&format!(
         "tar czf {}-1.0.tar.gz {}-1.0",
         package_name, package_name
     ))?;
 
     // Add and commit files
     debug!("Adding and committing files for {}", package_name);
-    shell.run("git add .")?;
-    shell.run("git commit -m 'Initial commit'")?;
+    shell.run_sync("git add .")?;
+    shell.run_sync("git commit -m 'Initial commit'")?;
 
     Ok(format!("file://{}", repo_path.display()))
 }
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     let backend = std::env::var("TEST_SPECTREE_BACKEND").unwrap_or_else(|_| "null".to_string());
     info!("Using backend: {}", backend);
 
-    // Run spectree
+    // run_sync spectree
     info!("Running spectree with test specification...");
     debug!(
         "Command: ./target/debug/spectree {} --workspace {} hello-extended --backend {} --log-level debug",

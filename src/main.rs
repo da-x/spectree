@@ -4,15 +4,16 @@ use nutype::nutype;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
+use std::{fs, path};
 use tokio::sync::mpsc;
 use tokio::task;
 use tracing::{debug, error, info, span, Instrument, Level};
 
+mod docker;
 mod logging;
 mod shell;
 mod utils;
@@ -21,9 +22,33 @@ use shell::Shell;
 
 use crate::utils::{check_git_clean, get_git_tree_hash};
 
+fn get_base_os() -> Result<String> {
+    let os_release_content = fs::read_to_string("/etc/os-release")?;
+
+    let mut id = None;
+    let mut version_id = None;
+
+    for line in os_release_content.lines() {
+        if let Some(value) = line.strip_prefix("ID=") {
+            id = Some(value.trim_matches('"'));
+        } else if let Some(value) = line.strip_prefix("VERSION_ID=") {
+            version_id = Some(value.trim_matches('"'));
+        }
+    }
+
+    match (id, version_id) {
+        (Some("rocky"), Some(version)) if version.starts_with("10") => Ok("epel10".to_string()),
+        (Some(id), Some(version)) => {
+            anyhow::bail!("Unsupported OS: ID={}, VERSION_ID={}", id, version)
+        }
+        _ => anyhow::bail!("Could not parse /etc/os-release"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuilderBackend {
     Mock,
+    Docker,
     Null,
 }
 
@@ -40,6 +65,7 @@ impl FromStr for BuilderBackend {
         match s.to_lowercase().as_str() {
             "mock" => Ok(BuilderBackend::Mock),
             "null" => Ok(BuilderBackend::Null),
+            "docker" => Ok(BuilderBackend::Docker),
             _ => anyhow::bail!("Invalid builder backend: {}. Valid options: mock, null", s),
         }
     }
@@ -50,6 +76,7 @@ impl std::fmt::Display for BuilderBackend {
         match self {
             BuilderBackend::Mock => write!(f, "mock"),
             BuilderBackend::Null => write!(f, "null"),
+            BuilderBackend::Docker => write!(f, "docker"),
         }
     }
 }
@@ -86,10 +113,14 @@ impl Dependency {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "source")]
+#[serde(tag = "source", deny_unknown_fields)]
 pub enum SourceType {
     #[serde(rename = "git")]
-    Git { url: String },
+    Git {
+        url: Option<String>,
+        path: Option<String>,
+    },
+
     #[serde(rename = "srpm")]
     Srpm { path: String },
 }
@@ -143,6 +174,7 @@ pub struct SourceHash(String);
 pub struct BuildHash(String);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Source {
     #[serde(rename = "type")]
     pub typ: SourceType,
@@ -178,6 +210,12 @@ struct Args {
         default_value = "mock"
     )]
     backend: BuilderBackend,
+
+    #[arg(
+        long,
+        help = "Target OS for Docker backend (e.g., fedora-39, centos-stream-9)"
+    )]
+    target_os: Option<String>,
 
     #[command(flatten)]
     logging: logging::LoggingArgs,
@@ -266,20 +304,39 @@ fn calculate_build_hash(
     BuildHash::new(format!("{:x}", hasher.finalize()))
 }
 
-fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Result<SourceHash> {
-    let repo_path = match &source.typ {
-        SourceType::Git { url } => {
-            if url.starts_with("file://") {
-                let local_path = &url[7..];
-                PathBuf::from(local_path)
-            } else {
-                clone_or_update_repo(url, workspace, key.as_ref())?
+impl Source {
+    fn get_repo_path(&self, key: &SourceKey, workspace: &Path, update: bool) -> Result<PathBuf> {
+        let repo_path = match &self.typ {
+            SourceType::Git { url, path } => {
+                if let Some(path) = path {
+                    let path = path.replace("${NAME}", key.as_ref());
+                    path::absolute(path)?
+                } else if let Some(url) = url {
+                    let url = url.replace("${NAME}", key.as_ref());
+                    if url.starts_with("file://") {
+                        PathBuf::from(&url[7..])
+                    } else {
+                        if !update {
+                            workspace.join("sources").join(key.as_ref())
+                        } else {
+                            clone_or_update_repo(&url, workspace, key.as_ref())?
+                        }
+                    }
+                } else {
+                    anyhow::bail!("Invalid Git source");
+                }
             }
-        }
-        SourceType::Srpm { path: _ } => {
-            anyhow::bail!("SRPM sources not yet implemented");
-        }
-    };
+            SourceType::Srpm { path: _ } => {
+                anyhow::bail!("SRPM sources not yet implemented");
+            }
+        };
+
+        Ok(repo_path)
+    }
+}
+
+fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Result<SourceHash> {
+    let repo_path = source.get_repo_path(key, workspace, true)?;
 
     if !check_git_clean(&repo_path)? {
         anyhow::bail!("Git repository for {} has uncommitted changes", key);
@@ -315,24 +372,6 @@ fn get_source_hashes(
         }
     }
     Ok(SourceHashes { hashes })
-}
-
-fn setup_source_build_directory(
-    key: &SourceKey,
-    build_hash: &BuildHash,
-    workspace: &Path,
-) -> Result<()> {
-    let build_dir = workspace
-        .join("builds")
-        .join(format!("{}-{}", key.as_ref(), &build_hash));
-    if !build_dir.exists() {
-        fs::create_dir_all(&build_dir)?;
-        info!("Created build directory: {}", build_dir.display());
-    } else {
-        debug!("Build directory already exists: {}", build_dir.display());
-    }
-
-    Ok(())
 }
 
 fn find_all_dependency_pairs(
@@ -449,28 +488,36 @@ fn resolve_dependencies(key: &SourceKey, spec_tree: &SpecTree) -> Result<Vec<Sou
     Ok(resolved)
 }
 
-fn build_source(
+async fn build_source(
     key: &SourceKey,
     source: &Source,
     build_hash: &BuildHash,
     all_dependencies: &HashMap<SourceKey, BuildHash>,
     workspace: &Path,
     backend: &BuilderBackend,
+    target_os: Option<&str>,
 ) -> Result<()> {
-    let build_dir =
+    let build_dir_final =
         workspace
             .join("builds")
             .join(format!("{}-{}", key.as_ref(), build_hash.as_ref()));
 
     // Check if build already exists - if so, do nothing
-    let build_subdir = build_dir.join("build");
-    if build_subdir.exists() && !build_subdir.read_dir()?.next().is_none() {
+    let build_subdir_final = build_dir_final.join("build");
+    if build_subdir_final.exists() {
         info!("Build already exists, skipping");
         return Ok(());
     }
 
-    // Setup build directory structure
-    setup_source_build_directory(key, build_hash, workspace)?;
+    let build_dir =
+        workspace
+            .join("builds")
+            .join(format!("{}-{}.tmp", key.as_ref(), build_hash.as_ref()));
+
+    let _ = fs::remove_dir_all(&build_dir);
+
+    // Check if build already exists - if so, do nothing
+    let build_subdir = build_dir.join("build");
 
     // Create build subdirectory
     fs::create_dir_all(&build_subdir)?;
@@ -499,41 +546,44 @@ fn build_source(
             }
 
             let target_dir = format!("{}-{}", dep_key, &dep_hash.as_ref());
-            shell.run(&format!("mkdir -p \"{}\"", target_dir))?;
-            shell.run(&format!(
-                "cp -al \"{}\"/* \"{}\"/ 2>/dev/null || true",
-                dep_build_dir.display(),
-                target_dir
-            ))?;
+            shell
+                .run_with_output(&format!("mkdir -p \"{}\"", target_dir))
+                .await?;
+            shell
+                .run_with_output(&format!(
+                    "cp -al \"{}\"/* \"{}\"/ 2>/dev/null || true",
+                    dep_build_dir.display(),
+                    target_dir
+                ))
+                .await?;
             debug!("Hardlinked dependency {} to deps directory", dep_key);
         }
 
         // Run createrepo_c to create repository metadata
-        shell.run("createrepo_c .")?;
+        shell.run_with_output("createrepo_c .").await?;
         info!("Created repository metadata in deps directory");
     }
 
     // Get source repository path
-    let repo_path = match &source.typ {
-        SourceType::Git { url } => {
-            if url.starts_with("file://") {
-                let local_path = &url[7..];
-                PathBuf::from(local_path)
-            } else {
-                workspace.join("sources").join(key.as_ref())
-            }
-        }
-        SourceType::Srpm { path: _ } => {
-            anyhow::bail!("SRPM sources not yet implemented");
-        }
+    let repo_path = source.get_repo_path(key, workspace, false)?;
+
+    let base_os = match target_os {
+        Some(os) => os.to_string(),
+        None => get_base_os()?,
     };
 
     info!("Generating source RPM using fedpkg");
     let fedpkg_shell = Shell::new(&repo_path);
-    fedpkg_shell.run_with_output("fedpkg srpm")?;
+    let build_srpm_dir = build_dir.join("srpm");
+    let build_srpm_dir_disp = build_srpm_dir.display();
+    task::block_in_place(|| {
+        fedpkg_shell.run_with_output_sync(&format!(
+            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\""
+        ))
+    })?;
 
     // Find the generated SRPM file
-    let srpm_files: Vec<_> = std::fs::read_dir(&repo_path)?
+    let srpm_files: Vec<_> = std::fs::read_dir(&build_srpm_dir)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -566,40 +616,196 @@ fn build_source(
     // Build command based on backend
     match backend {
         BuilderBackend::Mock => {
-            let mut mock_cmd = vec![
-                "mock".to_string(),
-                "--resultdir".to_string(),
-                build_subdir.to_string_lossy().to_string(),
-                srpm_path.to_string_lossy().to_string(),
-            ];
-
-            // Add repository for dependencies if they exist
-            if !all_dependencies.is_empty() {
-                let deps_dir = build_dir.join("deps");
-                mock_cmd.push("--addrepo".to_string());
-                mock_cmd.push(deps_dir.to_string_lossy().to_string());
-            }
-
-            // Add build parameters
-            for param in &source.build_params {
-                mock_cmd.push(param.clone());
-            }
-
-            // Execute mock
-            let mock_command = mock_cmd.join(" ");
-            info!("Executing mock: {}", mock_command);
-
-            let shell = Shell::new(workspace);
-            shell.run_interactive(&mock_command)?;
-
-            info!("✅ Successfully built with mock");
+            build_with_mock(
+                source,
+                all_dependencies,
+                workspace,
+                build_dir.clone(),
+                build_subdir,
+                srpm_path,
+            )
+            .await?;
         }
         BuilderBackend::Null => {
             info!("🚫 Null backend");
-            std::thread::sleep(Duration::from_millis(100));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        BuilderBackend::Docker => {
+            build_under_docker(workspace, target_os, build_dir.clone()).await?;
         }
     }
 
+    std::fs::rename(&build_dir, build_dir_final)?;
+
+    Ok(())
+}
+
+async fn build_under_docker(
+    workspace: &Path,
+    target_os: Option<&str>,
+    build_dir: PathBuf,
+) -> Result<(), anyhow::Error> {
+    let base_os = match target_os {
+        Some(os) => os.to_string(),
+        None => get_base_os()?,
+    };
+
+    info!("Using base OS: {}", base_os);
+
+    let dockerfile = docker::get_builder_dockerfile_for_os(&base_os)?;
+    let mut image = match docker::ensure_image(&base_os, &dockerfile, "").await? {
+        Ok(image) => image,
+        Err(output) => anyhow::bail!(
+            "error creating base os image: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    };
+
+    let shell = Shell::new(workspace).with_image(&image).with_mount(
+        &build_dir.to_string_lossy().as_ref().to_owned(),
+        "/workspace",
+    );
+
+    let missing_deps = shell
+        .run_with_output(
+            r#"
+rpm -D "_topdir /workspace/build" -i /workspace/srpm/*.src.rpm
+
+list-missing-deps() {
+    local param="-br"
+    if ! rpmbuild -br 2>/dev/null ; then
+        param="-bp"
+    fi
+
+    (rpmbuild ${param} "-D _topdir /workspace/build" /workspace/build/SPECS/*.spec 2>&1 || true) \
+        | (grep -v ^error: || true) \
+        | grep -E '([^ ]*) is needed by [^ ]+$' \
+        | sed -E 's/[\t]/ /g' \
+        | sed -E 's/ +(.*) is needed by [^ ]+$/\1/g'
+}
+
+# >&2
+list-missing-deps
+        "#,
+        )
+        .await?;
+
+    let mut deps: Vec<_> = missing_deps.lines().collect();
+    if !deps.is_empty() {
+        info!("Found {} dependencies", deps.len());
+        debug!("Dependencies: {:?}", deps);
+
+        let dep_repo = build_dir.join("deps").exists();
+
+        deps.sort();
+        let deps = deps
+            .iter()
+            .map(|x| format!("{:?}", x))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut hasher = Sha256::new();
+        hasher.update(deps.as_bytes());
+        let deps_image = format!("{image}-{:x}", hasher.finalize());
+        let dockerfile = if dep_repo {
+            format!(
+                r#"FROM {image}
+COPY --from=deps / /deps
+RUN dnf install --repofrompath=deps,file:///deps --setopt=deps.gpgcheck=0 --enablerepo=deps -y {deps}
+RUN rm -rf /deps
+"#
+            )
+        } else {
+            format!(
+                r#"FROM {image}
+RUN dnf install -y {deps}
+"#
+            )
+        };
+        debug!("image with deps Dockerfile: {:?}", dockerfile);
+        image = match docker::ensure_image(
+            &deps_image,
+            &dockerfile,
+            &if dep_repo {
+                format!(
+                    "--layers=false --build-context deps={}/deps",
+                    build_dir.display()
+                )
+            } else {
+                format!("--layers=false")
+            },
+        )
+        .await?
+        {
+            Ok(image) => image,
+            Err(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let mut found = false;
+                for line in stderr.lines() {
+                    if let Some(package_start) = line.find("Error: Unable to find a match: ") {
+                        let package =
+                            &line[package_start + "Error: Unable to find a match: ".len()..];
+                        error!(
+                            "Error: Unable to find a match: {}",
+                            package.replace(" \\t", " ")
+                        );
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    error!("Error: {}", stderr);
+                }
+                anyhow::bail!("not being able to install dependencies");
+            }
+        };
+
+        info!("Building on image {image}");
+    }
+
+    let shell = Shell::new(workspace).with_image(&image).with_mount(
+        &build_dir.to_string_lossy().as_ref().to_owned(),
+        "/workspace",
+    );
+
+    shell
+        .run_logged(
+            r#"
+rpmbuild -ba -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
+        "#,
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn build_with_mock(
+    source: &Source,
+    all_dependencies: &HashMap<SourceKey, BuildHash>,
+    workspace: &Path,
+    build_dir: PathBuf,
+    build_subdir: PathBuf,
+    srpm_path: &PathBuf,
+) -> Result<(), anyhow::Error> {
+    let mut mock_cmd = vec![
+        "mock".to_string(),
+        "--resultdir".to_string(),
+        build_subdir.to_string_lossy().to_string(),
+        srpm_path.to_string_lossy().to_string(),
+    ];
+    if !all_dependencies.is_empty() {
+        let deps_dir = build_dir.join("deps");
+        mock_cmd.push("--addrepo".to_string());
+        mock_cmd.push(deps_dir.to_string_lossy().to_string());
+    }
+    for param in &source.build_params {
+        mock_cmd.push(param.clone());
+    }
+    let mock_command = mock_cmd.join(" ");
+    info!("Executing mock: {}", mock_command);
+    let shell = Shell::new(workspace);
+    shell.run_logged(&mock_command).await?;
+    info!("✅ Successfully built with mock");
     Ok(())
 }
 
@@ -610,6 +816,7 @@ async fn build_source_task(
     all_dependencies: HashMap<SourceKey, BuildHash>,
     workspace: PathBuf,
     backend: BuilderBackend,
+    target_os: Option<String>,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
@@ -648,16 +855,16 @@ async fn build_source_task(
     info!("🔨 All dependencies ready");
 
     // Use block_in_place to call the synchronous build_source function
-    let build_result = task::block_in_place(|| {
-        build_source(
-            &key,
-            &source,
-            &build_hash,
-            &all_dependencies,
-            &workspace,
-            &backend,
-        )
-    });
+    let build_result = build_source(
+        &key,
+        &source,
+        &build_hash,
+        &all_dependencies,
+        &workspace,
+        &backend,
+        target_os.as_deref(),
+    )
+    .await;
 
     // Determine success/failure and notify all waiting tasks
     let success = match &build_result {
@@ -939,6 +1146,7 @@ async fn main() -> Result<()> {
         let task_source_key = source_key.clone();
         let task_workspace = args.workspace.clone();
         let task_backend = args.backend.clone();
+        let task_target_os = args.target_os.clone();
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
@@ -949,6 +1157,7 @@ async fn main() -> Result<()> {
                 source_deps,
                 task_workspace,
                 task_backend,
+                task_target_os,
                 direct_dependency_receivers,
                 direct_completion_senders,
             )

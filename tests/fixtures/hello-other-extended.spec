@@ -10,6 +10,8 @@ Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 Requires:       hello
 
+BuildRequires:  alsa-lib-devel
+
 %description
 An extended test package that depends on the hello package.
 
