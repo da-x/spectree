@@ -173,6 +173,31 @@ pub struct SourceHash(String);
 ))]
 pub struct BuildHash(String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BuildKey {
+    pub source_key: SourceKey,
+    pub build_hash: BuildHash,
+}
+
+impl BuildKey {
+    pub fn new(source_key: SourceKey, build_hash: BuildHash) -> Self {
+        Self {
+            source_key,
+            build_hash,
+        }
+    }
+
+    pub fn build_dir_name(&self) -> String {
+        format!("{}-{}", self.source_key.as_ref(), self.build_hash.as_ref())
+    }
+}
+
+impl std::fmt::Display for BuildKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.build_dir_name())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
@@ -489,18 +514,14 @@ fn resolve_dependencies(key: &SourceKey, spec_tree: &SpecTree) -> Result<Vec<Sou
 }
 
 async fn build_source(
-    key: &SourceKey,
+    build_key: &BuildKey,
     source: &Source,
-    build_hash: &BuildHash,
     all_dependencies: &HashMap<SourceKey, BuildHash>,
     workspace: &Path,
     backend: &BuilderBackend,
     target_os: Option<&str>,
 ) -> Result<()> {
-    let build_dir_final =
-        workspace
-            .join("builds")
-            .join(format!("{}-{}", key.as_ref(), build_hash.as_ref()));
+    let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
 
     // Check if build already exists - if so, do nothing
     let build_subdir_final = build_dir_final.join("build");
@@ -509,10 +530,9 @@ async fn build_source(
         return Ok(());
     }
 
-    let build_dir =
-        workspace
-            .join("builds")
-            .join(format!("{}-{}.tmp", key.as_ref(), build_hash.as_ref()));
+    let build_dir = workspace
+        .join("builds")
+        .join(format!("{}.tmp", build_key.build_dir_name()));
 
     let _ = fs::remove_dir_all(&build_dir);
 
@@ -533,9 +553,10 @@ async fn build_source(
 
         // Hardlink each dependency's build directory
         for (dep_key, dep_hash) in all_dependencies.iter() {
+            let dep_build_key = BuildKey::new(dep_key.clone(), dep_hash.clone());
             let dep_build_dir = workspace
                 .join("builds")
-                .join(format!("{}-{}", dep_key, dep_hash.as_ref()))
+                .join(dep_build_key.build_dir_name())
                 .join("build");
 
             if !dep_build_dir.exists() {
@@ -545,7 +566,7 @@ async fn build_source(
                 );
             }
 
-            let target_dir = format!("{}-{}", dep_key, &dep_hash.as_ref());
+            let target_dir = dep_build_key.build_dir_name();
             shell
                 .run_with_output(&format!("mkdir -p \"{}\"", target_dir))
                 .await?;
@@ -565,7 +586,7 @@ async fn build_source(
     }
 
     // Get source repository path
-    let repo_path = source.get_repo_path(key, workspace, false)?;
+    let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
 
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -589,7 +610,7 @@ async fn build_source(
             let path = entry.path();
             if path.extension()? == "rpm"
                 && path.file_name()?.to_str()?.contains(".src.")
-                && path.file_name()?.to_str()?.starts_with(key.as_ref())
+                && path.file_name()?.to_str()?.starts_with(build_key.source_key.as_ref())
             {
                 Some(path)
             } else {
@@ -605,7 +626,7 @@ async fn build_source(
     if srpm_files.len() > 1 {
         anyhow::bail!(
             "Multiple source RPMs found for {}: {:?}",
-            key.as_ref(),
+            build_key.source_key.as_ref(),
             srpm_files
         );
     }
@@ -810,9 +831,8 @@ async fn build_with_mock(
 }
 
 async fn build_source_task(
-    key: SourceKey,
+    build_key: BuildKey,
     source: Source,
-    build_hash: BuildHash,
     all_dependencies: HashMap<SourceKey, BuildHash>,
     workspace: PathBuf,
     backend: BuilderBackend,
@@ -846,7 +866,7 @@ async fn build_source_task(
                 anyhow::bail!(
                     "Dependency {} channel closed, cannot build {}",
                     dep_key,
-                    key
+                    build_key.source_key
                 );
             }
         }
@@ -856,9 +876,8 @@ async fn build_source_task(
 
     // Use block_in_place to call the synchronous build_source function
     let build_result = build_source(
-        &key,
+        &build_key,
         &source,
-        &build_hash,
         &all_dependencies,
         &workspace,
         &backend,
@@ -1150,10 +1169,10 @@ async fn main() -> Result<()> {
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
+            let task_build_key = BuildKey::new(task_source_key, source_build_hash);
             build_source_task(
-                task_source_key,
+                task_build_key,
                 source,
-                source_build_hash,
                 source_deps,
                 task_workspace,
                 task_backend,
