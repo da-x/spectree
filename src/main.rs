@@ -10,7 +10,6 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{fs, path};
 use tokio::sync::{mpsc, Mutex};
-use tokio::task;
 use tracing::{debug, error, info, span, Instrument, Level};
 
 mod docker;
@@ -831,7 +830,7 @@ async fn build_source(
     let sources_dir = fedpkg_working_dir.join("SOURCES");
     let specs_dir = fedpkg_working_dir.join("SPECS");
     let is_rhel_packaging = sources_dir.exists();
-    
+
     let fedpkg_defines = if is_rhel_packaging {
         info!("Detected RHEL Git packaging mode (SOURCES directory found)");
         format!(
@@ -848,23 +847,27 @@ async fn build_source(
         subpath
             .map(|s| format!(" from subpath '{}'", s))
             .unwrap_or_default(),
-        if is_rhel_packaging { " (RHEL mode)" } else { "" }
+        if is_rhel_packaging {
+            " (RHEL mode)"
+        } else {
+            ""
+        }
     );
     let fedpkg_shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join("srpm");
     let build_srpm_dir_disp = build_srpm_dir.display();
-    task::block_in_place(|| {
-        fedpkg_shell.run_with_output_sync(&format!(
+    fedpkg_shell
+        .run_with_output(&format!(
             "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}",
             fedpkg_defines
         ))
-    })
-    .with_context(|| {
-        format!(
-            "Failed to generate SRPM with fedpkg for {}",
-            build_key.source_key
-        )
-    })?;
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to generate SRPM with fedpkg for {}",
+                build_key.source_key
+            )
+        })?;
 
     // Find the generated SRPM file
     let srpm_files: Vec<_> = std::fs::read_dir(&build_srpm_dir)
@@ -877,13 +880,7 @@ async fn build_source(
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.extension()? == "rpm"
-                && path.file_name()?.to_str()?.contains(".src.")
-                && path
-                    .file_name()?
-                    .to_str()?
-                    .starts_with(build_key.source_key.as_ref())
-            {
+            if path.extension()? == "rpm" && path.file_name()?.to_str()?.ends_with(".src.rpm") {
                 Some(path)
             } else {
                 None
@@ -924,9 +921,15 @@ async fn build_source(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         BuilderBackend::Docker => {
-            build_under_docker(workspace, target_os, build_dir.clone(), &source.params, debug_prepare)
-                .await
-                .with_context(|| format!("Docker build failed for {}", build_key))?;
+            build_under_docker(
+                workspace,
+                target_os,
+                build_dir.clone(),
+                &source.params,
+                debug_prepare,
+            )
+            .await
+            .with_context(|| format!("Docker build failed for {}", build_key))?;
         }
         BuilderBackend::Copr => {
             let copr_project = copr_project
@@ -988,28 +991,36 @@ async fn build_under_docker(
         "/workspace",
     );
 
+    // Build the params string for rpmbuild
+    let params_str = if params.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", params.join(" "))
+    };
+
     let missing_deps = shell
-        .run_with_output(
+        .run_with_output(&format!(
             r#"
 rpm -D "_topdir /workspace/build" -i /workspace/srpm/*.src.rpm
 
-list-missing-deps() {
+list-missing-deps() {{
     local param="-br"
     if ! rpmbuild -br 2>/dev/null ; then
         param="-bp"
     fi
 
-    (rpmbuild ${param} "-D _topdir /workspace/build" /workspace/build/SPECS/*.spec 2>&1 || true) \
+    (rpmbuild ${{param}} "-D _topdir /workspace/build"{} /workspace/build/SPECS/*.spec 2>&1 || true) \
         | (grep -v ^error: || true) \
         | grep -E '([^ ]*) is needed by [^ ]+$' \
         | sed -E 's/[\t]/ /g' \
         | sed -E 's/ +(.*) is needed by [^ ]+$/\1/g'
-}
+}}
 
 # >&2
 list-missing-deps
         "#,
-        )
+            params_str
+        ))
         .await?;
 
     let mut deps: Vec<_> = missing_deps.lines().collect();
@@ -1089,13 +1100,6 @@ RUN dnf install -y {deps}
         &build_dir.to_string_lossy().as_ref().to_owned(),
         "/workspace",
     );
-
-    // Build the params string for rpmbuild
-    let params_str = if params.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", params.join(" "))
-    };
 
     if debug_prepare {
         info!("🔍 Debug mode: Running rpmbuild -bp (prepare only)");
@@ -1405,7 +1409,13 @@ async fn build_source_task(
             true
         }
         Err(e) => {
-            error!("❌ Build failed for {}", e);
+            error!("❌ Build failed, error chain:");
+            let mut index = 0;
+            e.chain().for_each(|cause| {
+                tracing::error!("  [{}]: {}", index, cause);
+                index += 1;
+            });
+
             false
         }
     };
