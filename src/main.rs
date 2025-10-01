@@ -3,13 +3,13 @@ use clap::Parser;
 use nutype::nutype;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
 use std::{fs, path};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tracing::{debug, error, info, span, Instrument, Level};
 
@@ -50,6 +50,7 @@ pub enum BuilderBackend {
     Mock,
     Docker,
     Null,
+    Copr,
 }
 
 impl Default for BuilderBackend {
@@ -66,7 +67,11 @@ impl FromStr for BuilderBackend {
             "mock" => Ok(BuilderBackend::Mock),
             "null" => Ok(BuilderBackend::Null),
             "docker" => Ok(BuilderBackend::Docker),
-            _ => anyhow::bail!("Invalid builder backend: {}. Valid options: mock, null", s),
+            "copr" => Ok(BuilderBackend::Copr),
+            _ => anyhow::bail!(
+                "Invalid builder backend: {}. Valid options: mock, null, docker, copr",
+                s
+            ),
         }
     }
 }
@@ -77,7 +82,14 @@ impl std::fmt::Display for BuilderBackend {
             BuilderBackend::Mock => write!(f, "mock"),
             BuilderBackend::Null => write!(f, "null"),
             BuilderBackend::Docker => write!(f, "docker"),
+            BuilderBackend::Copr => write!(f, "copr"),
         }
+    }
+}
+
+impl BuilderBackend {
+    pub fn is_remote(&self) -> bool {
+        matches!(self, BuilderBackend::Copr)
     }
 }
 
@@ -199,6 +211,53 @@ impl std::fmt::Display for BuildKey {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CoprBuildState {
+    pub build_key: String, // Using string instead of BuildKey for serialization simplicity
+    pub build_id: u64,
+    pub status: CoprBuildStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum CoprBuildStatus {
+    Submitted,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CoprStateFile {
+    pub builds: BTreeMap<String, CoprBuildState>, // key is build_key.to_string()
+}
+
+impl CoprStateFile {
+    pub fn load_or_create(path: &Path) -> Result<Self> {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            Ok(serde_yaml::from_str(&content)?)
+        } else {
+            Ok(Self {
+                builds: Default::default(),
+            })
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let content = serde_yaml::to_string(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn get_build_state(&self, build_key: &BuildKey) -> Option<&CoprBuildState> {
+        self.builds.get(&build_key.to_string())
+    }
+
+    pub fn set_build_state(&mut self, build_key: &BuildKey, build_state: CoprBuildState) {
+        self.builds.insert(build_key.to_string(), build_state);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     #[serde(rename = "type")]
@@ -241,6 +300,22 @@ struct Args {
         help = "Target OS for Docker backend (e.g., fedora-39, centos-stream-9)"
     )]
     target_os: Option<String>,
+
+    #[arg(long, help = "COPR project name (required for COPR backend)")]
+    copr_project: Option<String>,
+
+    #[arg(
+        long,
+        help = "YAML file to store COPR build state mappings (required for COPR backend)"
+    )]
+    copr_state_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Exclude chroot for COPR builds (can be specified multiple times)"
+    )]
+    exclude_chroot: Vec<String>,
 
     #[command(flatten)]
     logging: logging::LoggingArgs,
@@ -520,14 +595,47 @@ async fn build_source(
     workspace: &Path,
     backend: &BuilderBackend,
     target_os: Option<&str>,
+    copr_project: Option<&str>,
+    copr_state_file: Option<&Path>,
+    exclude_chroots: &[String],
+    copr_state_mutex: &Mutex<()>,
 ) -> Result<()> {
-    let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+    // For remote builds, check COPR state instead of local directories
+    if backend.is_remote() {
+        let copr_state_file = copr_state_file.ok_or_else(|| {
+            anyhow::anyhow!("COPR state file is required for remote backend")
+        })?;
+        
+        // Atomically check build state
+        let existing_build_info = {
+            let _guard = copr_state_mutex.lock().await;
+            let state = CoprStateFile::load_or_create(copr_state_file)?;
+            state.get_build_state(build_key).cloned()
+        };
 
-    // Check if build already exists - if so, do nothing
-    let build_subdir_final = build_dir_final.join("build");
-    if build_subdir_final.exists() {
-        info!("Build already exists, skipping");
-        return Ok(());
+        if let Some(existing_build) = existing_build_info {
+            match existing_build.status {
+                CoprBuildStatus::Completed => {
+                    info!("Remote build {} already completed for {}", existing_build.build_id, build_key);
+                    return Ok(());
+                }
+                CoprBuildStatus::Failed => {
+                    anyhow::bail!("Remote build {} failed for {}", existing_build.build_id, build_key);
+                }
+                CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
+                    info!("Remote build {} is in progress for {}, will wait later", existing_build.build_id, build_key);
+                    // Continue with the process - we'll wait in the backend-specific code
+                }
+            }
+        }
+    } else {
+        // For local builds, check if build directory already exists
+        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+        let build_subdir_final = build_dir_final.join("build");
+        if build_subdir_final.exists() {
+            info!("Build already exists, skipping");
+            return Ok(());
+        }
     }
 
     let build_dir = workspace
@@ -543,8 +651,8 @@ async fn build_source(
     fs::create_dir_all(&build_subdir)?;
     debug!("Created build subdirectory: {}", build_subdir.display());
 
-    // If there are dependencies, create deps directory and hardlink them
-    if !all_dependencies.is_empty() {
+    // If there are dependencies, create deps directory and hardlink them (skip for remote builds)
+    if !all_dependencies.is_empty() && !backend.is_remote() {
         let deps_dir = build_dir.join("deps");
         fs::create_dir_all(&deps_dir)?;
         info!("Created deps directory: {}", deps_dir.display());
@@ -610,7 +718,10 @@ async fn build_source(
             let path = entry.path();
             if path.extension()? == "rpm"
                 && path.file_name()?.to_str()?.contains(".src.")
-                && path.file_name()?.to_str()?.starts_with(build_key.source_key.as_ref())
+                && path
+                    .file_name()?
+                    .to_str()?
+                    .starts_with(build_key.source_key.as_ref())
             {
                 Some(path)
             } else {
@@ -654,9 +765,28 @@ async fn build_source(
         BuilderBackend::Docker => {
             build_under_docker(workspace, target_os, build_dir.clone()).await?;
         }
+        BuilderBackend::Copr => {
+            let copr_project = copr_project
+                .ok_or_else(|| anyhow::anyhow!("COPR project name is required for COPR backend"))?;
+            let copr_state_file = copr_state_file
+                .ok_or_else(|| anyhow::anyhow!("COPR state file is required for COPR backend"))?;
+            build_with_copr(
+                build_key,
+                srpm_path,
+                copr_project,
+                exclude_chroots,
+                copr_state_file,
+                copr_state_mutex,
+            )
+            .await?;
+        }
     }
 
-    std::fs::rename(&build_dir, build_dir_final)?;
+    // For remote builds, we don't need to rename directories since builds happen remotely
+    if !backend.is_remote() {
+        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+        std::fs::rename(&build_dir, build_dir_final)?;
+    }
 
     Ok(())
 }
@@ -800,6 +930,163 @@ rpmbuild -ba -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
     Ok(())
 }
 
+async fn build_with_copr(
+    build_key: &BuildKey,
+    srpm_path: &PathBuf,
+    copr_project: &str,
+    exclude_chroots: &[String],
+    copr_state_file: &Path,
+    state_mutex: &Mutex<()>,
+) -> Result<()> {
+    // Check if there's an existing build in progress and wait for it
+    let existing_build_info = {
+        let _guard = state_mutex.lock().await;
+        let state = CoprStateFile::load_or_create(copr_state_file)?;
+        state.get_build_state(build_key).cloned()
+    };
+
+    if let Some(existing_build) = existing_build_info {
+        match existing_build.status {
+            CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
+                info!(
+                    "COPR build {} is in progress for {}, waiting...",
+                    existing_build.build_id, build_key
+                );
+                // Wait for existing build
+                return wait_for_copr_build(
+                    existing_build.build_id,
+                    build_key,
+                    copr_state_file,
+                    state_mutex,
+                )
+                .await;
+            }
+            CoprBuildStatus::Failed => {
+                info!(
+                    "Previous COPR build {} failed for {}, retrying",
+                    existing_build.build_id, build_key
+                );
+                // Continue to submit new build
+            }
+            CoprBuildStatus::Completed => {
+                // This should not happen as it's checked earlier, but handle gracefully
+                info!(
+                    "COPR build {} already completed for {}",
+                    existing_build.build_id, build_key
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    // Submit new build
+    info!("Submitting COPR build for {}", build_key);
+    let mut copr_cmd = vec![
+        "copr".to_string(),
+        "build".to_string(),
+        "--nowait".to_string(),
+        copr_project.to_string(),
+        srpm_path.to_string_lossy().to_string(),
+    ];
+
+    // Add exclude-chroot arguments
+    for chroot in exclude_chroots {
+        copr_cmd.push("--exclude-chroot".to_string());
+        copr_cmd.push(chroot.clone());
+    }
+
+    let copr_command = copr_cmd.join(" ");
+    info!("Executing COPR command: {}", copr_command);
+
+    let current_dir = std::env::current_dir()?;
+    let shell = Shell::new(current_dir.as_path());
+    let output = shell.run_with_output(&copr_command).await?;
+
+    // Parse build ID from output
+    let build_id = extract_copr_build_id(&output)?;
+    info!("COPR build submitted with ID: {}", build_id);
+
+    // Atomically save build state
+    {
+        let _guard = state_mutex.lock().await;
+        let mut state = CoprStateFile::load_or_create(copr_state_file)?;
+        let build_state = CoprBuildState {
+            build_key: build_key.to_string(),
+            build_id,
+            status: CoprBuildStatus::Submitted,
+        };
+        state.set_build_state(build_key, build_state);
+        state.save(copr_state_file)?;
+    }
+
+    // Wait for build completion
+    wait_for_copr_build(build_id, build_key, copr_state_file, state_mutex).await
+}
+
+async fn wait_for_copr_build(
+    build_id: u64,
+    build_key: &BuildKey,
+    copr_state_file: &Path,
+    state_mutex: &Mutex<()>,
+) -> Result<()> {
+    info!("Waiting for COPR build {} to complete", build_id);
+
+    // Atomically update status to InProgress
+    {
+        let _guard = state_mutex.lock().await;
+        let mut state = CoprStateFile::load_or_create(copr_state_file)?;
+        if let Some(build_state) = state.builds.get_mut(&build_key.to_string()) {
+            build_state.status = CoprBuildStatus::InProgress;
+            state.save(copr_state_file)?;
+        }
+    }
+
+    let watch_command = format!("copr watch-build {}", build_id);
+    let current_dir = std::env::current_dir()?;
+    let shell = Shell::new(current_dir.as_path());
+
+    match shell.run_with_output(&watch_command).await {
+        Ok(_) => {
+            info!("✅ COPR build {} completed successfully", build_id);
+            // Atomically update status to Completed
+            {
+                let _guard = state_mutex.lock().await;
+                let mut state = CoprStateFile::load_or_create(copr_state_file)?;
+                if let Some(build_state) = state.builds.get_mut(&build_key.to_string()) {
+                    build_state.status = CoprBuildStatus::Completed;
+                    state.save(copr_state_file)?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            error!("❌ COPR build {} failed: {}", build_id, e);
+            // Atomically update status to Failed
+            {
+                let _guard = state_mutex.lock().await;
+                let mut state = CoprStateFile::load_or_create(copr_state_file)?;
+                if let Some(build_state) = state.builds.get_mut(&build_key.to_string()) {
+                    build_state.status = CoprBuildStatus::Failed;
+                    state.save(copr_state_file)?;
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+fn extract_copr_build_id(output: &str) -> Result<u64> {
+    for line in output.lines() {
+        if line.starts_with("Created builds: ") {
+            let id_str = line.strip_prefix("Created builds: ").unwrap().trim();
+            return id_str
+                .parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("Failed to parse build ID '{}': {}", id_str, e));
+        }
+    }
+    anyhow::bail!("No 'Created builds:' line found in COPR output");
+}
+
 async fn build_with_mock(
     source: &Source,
     all_dependencies: &HashMap<SourceKey, BuildHash>,
@@ -837,6 +1124,10 @@ async fn build_source_task(
     workspace: PathBuf,
     backend: BuilderBackend,
     target_os: Option<String>,
+    copr_project: Option<String>,
+    copr_state_file: Option<PathBuf>,
+    exclude_chroots: Vec<String>,
+    copr_state_mutex: std::sync::Arc<Mutex<()>>,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
@@ -882,6 +1173,10 @@ async fn build_source_task(
         &workspace,
         &backend,
         target_os.as_deref(),
+        copr_project.as_deref(),
+        copr_state_file.as_deref(),
+        &exclude_chroots,
+        &*copr_state_mutex,
     )
     .await;
 
@@ -1007,6 +1302,19 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     logging::start(&args.logging)?;
+
+    // Always create the mutex (simpler than conditional logic)
+    let copr_state_mutex = std::sync::Arc::new(Mutex::new(()));
+
+    // Validate COPR arguments if using COPR backend
+    if args.backend == BuilderBackend::Copr {
+        if args.copr_project.is_none() {
+            anyhow::bail!("--copr-project is required when using COPR backend");
+        }
+        if args.copr_state_file.is_none() {
+            anyhow::bail!("--copr-state-file is required when using COPR backend");
+        }
+    }
 
     setup_workspace(&args.workspace)?;
 
@@ -1166,6 +1474,10 @@ async fn main() -> Result<()> {
         let task_workspace = args.workspace.clone();
         let task_backend = args.backend.clone();
         let task_target_os = args.target_os.clone();
+        let task_copr_project = args.copr_project.clone();
+        let task_copr_state_file = args.copr_state_file.clone();
+        let task_exclude_chroots = args.exclude_chroot.clone();
+        let task_copr_state_mutex = copr_state_mutex.clone();
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
@@ -1177,6 +1489,10 @@ async fn main() -> Result<()> {
                 task_workspace,
                 task_backend,
                 task_target_os,
+                task_copr_project,
+                task_copr_state_file,
+                task_exclude_chroots,
+                task_copr_state_mutex,
                 direct_dependency_receivers,
                 direct_completion_senders,
             )
