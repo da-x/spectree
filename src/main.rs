@@ -321,6 +321,12 @@ struct Args {
     )]
     exclude_chroot: Vec<String>,
 
+    #[arg(
+        long,
+        help = "Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection. Build will fail intentionally."
+    )]
+    debug_prepare: bool,
+
     #[command(flatten)]
     logging: logging::LoggingArgs,
 }
@@ -614,6 +620,7 @@ async fn build_source(
     copr_state_file: Option<&Path>,
     exclude_chroots: &[String],
     copr_state_mutex: &Mutex<()>,
+    debug_prepare: bool,
 ) -> Result<()> {
     // For remote builds, check COPR state instead of local directories
     if backend.is_remote() {
@@ -787,7 +794,7 @@ async fn build_source(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         BuilderBackend::Docker => {
-            build_under_docker(workspace, target_os, build_dir.clone())
+            build_under_docker(workspace, target_os, build_dir.clone(), debug_prepare)
                 .await
                 .with_context(|| format!("Docker build failed for {}", build_key))?;
         }
@@ -823,6 +830,7 @@ async fn build_under_docker(
     workspace: &Path,
     target_os: Option<&str>,
     build_dir: PathBuf,
+    debug_prepare: bool,
 ) -> Result<(), anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -947,13 +955,34 @@ RUN dnf install -y {deps}
         "/workspace",
     );
 
-    shell
-        .run_logged(
-            r#"
+    if debug_prepare {
+        info!("🔍 Debug mode: Running rpmbuild -bp (prepare only)");
+        shell
+            .run_logged(
+                r#"
+rpmbuild -bp -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
+            "#,
+            )
+            .await
+            .context("Failed to prepare sources with rpmbuild -bp")?;
+
+        // Print the prepared source path
+        let build_sources_path = build_dir.join("build/BUILD");
+        info!("📁 Prepared sources available at: {}", build_sources_path.display());
+        info!("🔍 You can inspect the prepared sources by examining the BUILD directory");
+        info!("💡 The sources are left in the workspace for debugging purposes");
+        
+        // Intentionally fail the build as requested
+        anyhow::bail!("Build intentionally stopped after prepare phase for debugging (--debug-prepare mode)");
+    } else {
+        shell
+            .run_logged(
+                r#"
 rpmbuild -ba -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
-        "#,
-        )
-        .await?;
+            "#,
+            )
+            .await?;
+    }
 
     Ok(())
 }
@@ -1164,6 +1193,7 @@ async fn build_source_task(
     copr_state_file: Option<PathBuf>,
     exclude_chroots: Vec<String>,
     copr_state_mutex: std::sync::Arc<Mutex<()>>,
+    debug_prepare: bool,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
@@ -1213,6 +1243,7 @@ async fn build_source_task(
         copr_state_file.as_deref(),
         &exclude_chroots,
         &*copr_state_mutex,
+        debug_prepare,
     )
     .await;
 
@@ -1350,6 +1381,11 @@ async fn main() -> Result<()> {
         if args.copr_state_file.is_none() {
             anyhow::bail!("--copr-state-file is required when using COPR backend");
         }
+    }
+
+    // Validate debug_prepare is only used with Docker backend
+    if args.debug_prepare && args.backend != BuilderBackend::Docker {
+        anyhow::bail!("--debug-prepare can only be used with Docker backend");
     }
 
     setup_workspace(&args.workspace)?;
@@ -1516,6 +1552,7 @@ async fn main() -> Result<()> {
         let task_copr_state_file = args.copr_state_file.clone();
         let task_exclude_chroots = args.exclude_chroot.clone();
         let task_copr_state_mutex = copr_state_mutex.clone();
+        let task_debug_prepare = args.debug_prepare;
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
@@ -1531,6 +1568,7 @@ async fn main() -> Result<()> {
                 task_copr_state_file,
                 task_exclude_chroots,
                 task_copr_state_mutex,
+                task_debug_prepare,
                 direct_dependency_receivers,
                 direct_completion_senders,
             )
