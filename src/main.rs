@@ -270,7 +270,7 @@ pub struct Source {
     #[serde(default)]
     pub dependencies: Vec<SourceKey>,
     #[serde(default)]
-    pub build_params: Vec<String>,
+    pub params: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -449,7 +449,7 @@ fn calculate_build_hash(
     dep_hashes.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
     hasher.update(format!("{:?}", dep_hashes).as_bytes());
 
-    hasher.update(format!("{:?}", source.build_params).as_bytes());
+    hasher.update(format!("{:?}", source.params).as_bytes());
     BuildHash::new(format!("{:x}", hasher.finalize()))
 }
 
@@ -494,7 +494,9 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
 
     // Extract subpath from source type if it's a Git source
     let subpath = match &source.typ {
-        SourceType::Git { subpath, .. } => subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref())),
+        SourceType::Git { subpath, .. } => {
+            subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()))
+        }
         _ => None,
     };
     let subpath = subpath.as_deref();
@@ -504,7 +506,9 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
         "Processed sources for source: {} (git: {}){}",
         key,
         git_hash,
-        subpath.map(|s| format!(" subpath: {}", s)).unwrap_or_default()
+        subpath
+            .map(|s| format!(" subpath: {}", s))
+            .unwrap_or_default()
     );
 
     Ok(SourceHash::new(git_hash))
@@ -789,7 +793,9 @@ async fn build_source(
 
     // Extract subpath from source type if it's a Git source
     let subpath = match &source.typ {
-        SourceType::Git { subpath, .. } => subpath.as_ref().map(|s| s.replace("${NAME}", build_key.source_key.as_ref())),
+        SourceType::Git { subpath, .. } => subpath
+            .as_ref()
+            .map(|s| s.replace("${NAME}", build_key.source_key.as_ref())),
         _ => None,
     };
     let subpath = subpath.as_deref();
@@ -823,7 +829,9 @@ async fn build_source(
 
     info!(
         "Generating source RPM using fedpkg{}",
-        subpath.map(|s| format!(" from subpath '{}'", s)).unwrap_or_default()
+        subpath
+            .map(|s| format!(" from subpath '{}'", s))
+            .unwrap_or_default()
     );
     let fedpkg_shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join("srpm");
@@ -898,7 +906,7 @@ async fn build_source(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         BuilderBackend::Docker => {
-            build_under_docker(workspace, target_os, build_dir.clone(), debug_prepare)
+            build_under_docker(workspace, target_os, build_dir.clone(), &source.params, debug_prepare)
                 .await
                 .with_context(|| format!("Docker build failed for {}", build_key))?;
         }
@@ -938,6 +946,7 @@ async fn build_under_docker(
     workspace: &Path,
     target_os: Option<&str>,
     build_dir: PathBuf,
+    params: &[String],
     debug_prepare: bool,
 ) -> Result<(), anyhow::Error> {
     let base_os = match target_os {
@@ -1063,14 +1072,22 @@ RUN dnf install -y {deps}
         "/workspace",
     );
 
+    // Build the params string for rpmbuild
+    let params_str = if params.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", params.join(" "))
+    };
+
     if debug_prepare {
         info!("🔍 Debug mode: Running rpmbuild -bp (prepare only)");
         shell
-            .run_logged(
+            .run_logged(&format!(
                 r#"
-rpmbuild -bp -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
+rpmbuild -bp -D "_topdir /workspace/build"{} /workspace/build/SPECS/*.spec
             "#,
-            )
+                params_str
+            ))
             .await
             .context("Failed to prepare sources with rpmbuild -bp")?;
 
@@ -1089,11 +1106,12 @@ rpmbuild -bp -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
         );
     } else {
         shell
-            .run_logged(
+            .run_logged(&format!(
                 r#"
-rpmbuild -ba -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
+rpmbuild -ba -D "_topdir /workspace/build"{} /workspace/build/SPECS/*.spec
             "#,
-            )
+                params_str
+            ))
             .await?;
     }
 
@@ -1283,7 +1301,7 @@ async fn build_with_mock(
         mock_cmd.push("--addrepo".to_string());
         mock_cmd.push(deps_dir.to_string_lossy().to_string());
     }
-    for param in &source.build_params {
+    for param in &source.params {
         mock_cmd.push(param.clone());
     }
     let mock_command = mock_cmd.join(" ");
