@@ -131,6 +131,7 @@ pub enum SourceType {
     Git {
         url: Option<String>,
         path: Option<String>,
+        subpath: Option<String>,
     },
 
     #[serde(rename = "srpm")]
@@ -245,8 +246,8 @@ impl CoprStateFile {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = serde_yaml::to_string(self)
-            .context("Failed to serialize COPR state to YAML")?;
+        let content =
+            serde_yaml::to_string(self).context("Failed to serialize COPR state to YAML")?;
         fs::write(path, content)
             .with_context(|| format!("Failed to write COPR state file: {}", path.display()))?;
         Ok(())
@@ -332,12 +333,24 @@ struct Args {
 }
 
 fn setup_workspace(workspace: &Path) -> Result<()> {
-    fs::create_dir_all(&workspace)
-        .with_context(|| format!("Failed to create workspace directory: {}", workspace.display()))?;
-    fs::create_dir_all(workspace.join("sources"))
-        .with_context(|| format!("Failed to create sources directory: {}", workspace.join("sources").display()))?;
-    fs::create_dir_all(workspace.join("builds"))
-        .with_context(|| format!("Failed to create builds directory: {}", workspace.join("builds").display()))?;
+    fs::create_dir_all(&workspace).with_context(|| {
+        format!(
+            "Failed to create workspace directory: {}",
+            workspace.display()
+        )
+    })?;
+    fs::create_dir_all(workspace.join("sources")).with_context(|| {
+        format!(
+            "Failed to create sources directory: {}",
+            workspace.join("sources").display()
+        )
+    })?;
+    fs::create_dir_all(workspace.join("builds")).with_context(|| {
+        format!(
+            "Failed to create builds directory: {}",
+            workspace.join("builds").display()
+        )
+    })?;
     info!("Workspace setup at: {}", workspace.display());
     Ok(())
 }
@@ -352,7 +365,12 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
             .args(&["fetch", "origin"])
             .current_dir(&repo_path)
             .output()
-            .with_context(|| format!("Failed to execute git fetch in repo: {}", repo_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to execute git fetch in repo: {}",
+                    repo_path.display()
+                )
+            })?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -366,7 +384,12 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
             .args(&["reset", "--hard", "origin/HEAD"])
             .current_dir(&repo_path)
             .output()
-            .with_context(|| format!("Failed to execute git reset in repo: {}", repo_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to execute git reset in repo: {}",
+                    repo_path.display()
+                )
+            })?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -380,7 +403,13 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
         let output = Command::new("git")
             .args(&["clone", url, &repo_path.to_string_lossy()])
             .output()
-            .with_context(|| format!("Failed to execute git clone from {} to {}", url, repo_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to execute git clone from {} to {}",
+                    url,
+                    repo_path.display()
+                )
+            })?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -427,7 +456,7 @@ fn calculate_build_hash(
 impl Source {
     fn get_repo_path(&self, key: &SourceKey, workspace: &Path, update: bool) -> Result<PathBuf> {
         let repo_path = match &self.typ {
-            SourceType::Git { url, path } => {
+            SourceType::Git { url, path, .. } => {
                 if let Some(path) = path {
                     let path = path.replace("${NAME}", key.as_ref());
                     path::absolute(&path)
@@ -463,8 +492,20 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
         anyhow::bail!("Git repository for {} has uncommitted changes", key);
     }
 
-    let git_hash = get_git_tree_hash(&repo_path)?;
-    debug!("Processed sources for source: {} (git: {})", key, git_hash);
+    // Extract subpath from source type if it's a Git source
+    let subpath = match &source.typ {
+        SourceType::Git { subpath, .. } => subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref())),
+        _ => None,
+    };
+    let subpath = subpath.as_deref();
+
+    let git_hash = get_git_tree_hash(&repo_path, subpath)?;
+    debug!(
+        "Processed sources for source: {} (git: {}){}",
+        key,
+        git_hash,
+        subpath.map(|s| format!(" subpath: {}", s)).unwrap_or_default()
+    );
 
     Ok(SourceHash::new(git_hash))
 }
@@ -624,10 +665,9 @@ async fn build_source(
 ) -> Result<()> {
     // For remote builds, check COPR state instead of local directories
     if backend.is_remote() {
-        let copr_state_file = copr_state_file.ok_or_else(|| {
-            anyhow::anyhow!("COPR state file is required for remote backend")
-        })?;
-        
+        let copr_state_file = copr_state_file
+            .ok_or_else(|| anyhow::anyhow!("COPR state file is required for remote backend"))?;
+
         // Atomically check build state
         let existing_build_info = {
             let _guard = copr_state_mutex.lock().await;
@@ -638,14 +678,24 @@ async fn build_source(
         if let Some(existing_build) = existing_build_info {
             match existing_build.status {
                 CoprBuildStatus::Completed => {
-                    info!("Remote build {} already completed for {}", existing_build.build_id, build_key);
+                    info!(
+                        "Remote build {} already completed for {}",
+                        existing_build.build_id, build_key
+                    );
                     return Ok(());
                 }
                 CoprBuildStatus::Failed => {
-                    anyhow::bail!("Remote build {} failed for {}", existing_build.build_id, build_key);
+                    anyhow::bail!(
+                        "Remote build {} failed for {}",
+                        existing_build.build_id,
+                        build_key
+                    );
                 }
                 CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
-                    info!("Remote build {} is in progress for {}, will wait later", existing_build.build_id, build_key);
+                    info!(
+                        "Remote build {} is in progress for {}, will wait later",
+                        existing_build.build_id, build_key
+                    );
                     // Continue with the process - we'll wait in the backend-specific code
                 }
             }
@@ -670,8 +720,12 @@ async fn build_source(
     let build_subdir = build_dir.join("build");
 
     // Create build subdirectory
-    fs::create_dir_all(&build_subdir)
-        .with_context(|| format!("Failed to create build subdirectory: {}", build_subdir.display()))?;
+    fs::create_dir_all(&build_subdir).with_context(|| {
+        format!(
+            "Failed to create build subdirectory: {}",
+            build_subdir.display()
+        )
+    })?;
     debug!("Created build subdirectory: {}", build_subdir.display());
 
     // If there are dependencies, create deps directory and hardlink them (skip for remote builds)
@@ -702,7 +756,9 @@ async fn build_source(
             shell
                 .run_with_output(&format!("mkdir -p \"{}\"", target_dir))
                 .await
-                .with_context(|| format!("Failed to create dependency directory: {}", target_dir))?;
+                .with_context(|| {
+                    format!("Failed to create dependency directory: {}", target_dir)
+                })?;
             shell
                 .run_with_output(&format!(
                     "cp -al \"{}\"/* \"{}\"/ 2>/dev/null || true",
@@ -710,13 +766,19 @@ async fn build_source(
                     target_dir
                 ))
                 .await
-                .with_context(|| format!("Failed to hardlink dependency from {} to {}", 
-                    dep_build_dir.display(), target_dir))?;
+                .with_context(|| {
+                    format!(
+                        "Failed to hardlink dependency from {} to {}",
+                        dep_build_dir.display(),
+                        target_dir
+                    )
+                })?;
             debug!("Hardlinked dependency {} to deps directory", dep_key);
         }
 
         // Run createrepo_c to create repository metadata
-        shell.run_with_output("createrepo_c .")
+        shell
+            .run_with_output("createrepo_c .")
             .await
             .context("Failed to create repository metadata with createrepo_c")?;
         info!("Created repository metadata in deps directory");
@@ -725,13 +787,45 @@ async fn build_source(
     // Get source repository path
     let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
 
+    // Extract subpath from source type if it's a Git source
+    let subpath = match &source.typ {
+        SourceType::Git { subpath, .. } => subpath.as_ref().map(|s| s.replace("${NAME}", build_key.source_key.as_ref())),
+        _ => None,
+    };
+    let subpath = subpath.as_deref();
+
+    // Determine the working directory for fedpkg
+    let fedpkg_working_dir = if let Some(subpath) = subpath {
+        let subpath_dir = repo_path.join(subpath);
+        if !subpath_dir.exists() {
+            anyhow::bail!(
+                "Subpath '{}' does not exist in repository at {}",
+                subpath,
+                repo_path.display()
+            );
+        }
+        if !subpath_dir.is_dir() {
+            anyhow::bail!(
+                "Subpath '{}' is not a directory in repository at {}",
+                subpath,
+                repo_path.display()
+            );
+        }
+        subpath_dir
+    } else {
+        repo_path
+    };
+
     let base_os = match target_os {
         Some(os) => os.to_string(),
         None => get_base_os()?,
     };
 
-    info!("Generating source RPM using fedpkg");
-    let fedpkg_shell = Shell::new(&repo_path);
+    info!(
+        "Generating source RPM using fedpkg{}",
+        subpath.map(|s| format!(" from subpath '{}'", s)).unwrap_or_default()
+    );
+    let fedpkg_shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join("srpm");
     let build_srpm_dir_disp = build_srpm_dir.display();
     task::block_in_place(|| {
@@ -739,11 +833,21 @@ async fn build_source(
             "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\""
         ))
     })
-    .with_context(|| format!("Failed to generate SRPM with fedpkg for {}", build_key.source_key))?;
+    .with_context(|| {
+        format!(
+            "Failed to generate SRPM with fedpkg for {}",
+            build_key.source_key
+        )
+    })?;
 
     // Find the generated SRPM file
     let srpm_files: Vec<_> = std::fs::read_dir(&build_srpm_dir)
-        .with_context(|| format!("Failed to read SRPM directory: {}", build_srpm_dir.display()))?
+        .with_context(|| {
+            format!(
+                "Failed to read SRPM directory: {}",
+                build_srpm_dir.display()
+            )
+        })?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -818,9 +922,13 @@ async fn build_source(
     // For remote builds, we don't need to rename directories since builds happen remotely
     if !backend.is_remote() {
         let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
-        std::fs::rename(&build_dir, &build_dir_final)
-            .with_context(|| format!("Failed to rename build directory from {} to {}", 
-                build_dir.display(), build_dir_final.display()))?;
+        std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
+            format!(
+                "Failed to rename build directory from {} to {}",
+                build_dir.display(),
+                build_dir_final.display()
+            )
+        })?;
     }
 
     Ok(())
@@ -968,12 +1076,17 @@ rpmbuild -bp -D "_topdir /workspace/build" /workspace/build/SPECS/*.spec
 
         // Print the prepared source path
         let build_sources_path = build_dir.join("build/BUILD");
-        info!("📁 Prepared sources available at: {}", build_sources_path.display());
+        info!(
+            "📁 Prepared sources available at: {}",
+            build_sources_path.display()
+        );
         info!("🔍 You can inspect the prepared sources by examining the BUILD directory");
         info!("💡 The sources are left in the workspace for debugging purposes");
-        
+
         // Intentionally fail the build as requested
-        anyhow::bail!("Build intentionally stopped after prepare phase for debugging (--debug-prepare mode)");
+        anyhow::bail!(
+            "Build intentionally stopped after prepare phase for debugging (--debug-prepare mode)"
+        );
     } else {
         shell
             .run_logged(
@@ -1055,10 +1168,10 @@ async fn build_with_copr(
     let copr_command = copr_cmd.join(" ");
     info!("Executing COPR command: {}", copr_command);
 
-    let current_dir = std::env::current_dir()
-        .context("Failed to get current working directory")?;
+    let current_dir = std::env::current_dir().context("Failed to get current working directory")?;
     let shell = Shell::new(current_dir.as_path());
-    let output = shell.run_with_output(&copr_command)
+    let output = shell
+        .run_with_output(&copr_command)
         .await
         .with_context(|| format!("Failed to execute COPR build command: {}", copr_command))?;
 
@@ -1102,13 +1215,14 @@ async fn wait_for_copr_build(
     }
 
     let watch_command = format!("copr watch-build {}", build_id);
-    let current_dir = std::env::current_dir()
-        .context("Failed to get current working directory")?;
+    let current_dir = std::env::current_dir().context("Failed to get current working directory")?;
     let shell = Shell::new(current_dir.as_path());
 
-    match shell.run_with_output(&watch_command)
+    match shell
+        .run_with_output(&watch_command)
         .await
-        .with_context(|| format!("Failed to execute COPR watch command: {}", watch_command)) {
+        .with_context(|| format!("Failed to execute COPR watch command: {}", watch_command))
+    {
         Ok(_) => {
             info!("✅ COPR build {} completed successfully", build_id);
             // Atomically update status to Completed
@@ -1175,7 +1289,8 @@ async fn build_with_mock(
     let mock_command = mock_cmd.join(" ");
     info!("Executing mock: {}", mock_command);
     let shell = Shell::new(workspace);
-    shell.run_logged(&mock_command)
+    shell
+        .run_logged(&mock_command)
         .await
         .with_context(|| format!("Failed to execute mock build command: {}", mock_command))?;
     info!("✅ Successfully built with mock");
