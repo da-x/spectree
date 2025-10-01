@@ -827,18 +827,36 @@ async fn build_source(
         None => get_base_os()?,
     };
 
+    // Check for RHEL Git packaging mode (SOURCES subdirectory exists)
+    let sources_dir = fedpkg_working_dir.join("SOURCES");
+    let specs_dir = fedpkg_working_dir.join("SPECS");
+    let is_rhel_packaging = sources_dir.exists();
+    
+    let fedpkg_defines = if is_rhel_packaging {
+        info!("Detected RHEL Git packaging mode (SOURCES directory found)");
+        format!(
+            " --define \"_sourcedir {}\" --define \"_specdir {}\"",
+            sources_dir.display(),
+            specs_dir.display()
+        )
+    } else {
+        String::new()
+    };
+
     info!(
-        "Generating source RPM using fedpkg{}",
+        "Generating source RPM using fedpkg{}{}",
         subpath
             .map(|s| format!(" from subpath '{}'", s))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        if is_rhel_packaging { " (RHEL mode)" } else { "" }
     );
     let fedpkg_shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join("srpm");
     let build_srpm_dir_disp = build_srpm_dir.display();
     task::block_in_place(|| {
         fedpkg_shell.run_with_output_sync(&format!(
-            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\""
+            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}",
+            fedpkg_defines
         ))
     })
     .with_context(|| {
