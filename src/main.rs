@@ -438,11 +438,7 @@ fn calculate_build_hash(
     for dep_str in &source.dependencies {
         let dependency = Dependency::parse(dep_str.as_ref());
         if let Some(dep_hash) = dependency_hashes.get(dependency.key()) {
-            dep_hashes.push((
-                dependency.key().to_string(),
-                dep_hash.clone(),
-                dependency.is_direct_only(),
-            ));
+            dep_hashes.push((dependency.key().to_string(), dep_hash.clone(), false));
         }
     }
     dep_hashes.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
