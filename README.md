@@ -132,7 +132,8 @@ spectree packages.yaml /workspace app \
   --backend copr \
   --copr-project myproject \
   --copr-state-file builds.yaml \
-  --exclude-chroot fedora-38-x86_64
+  --exclude-chroot fedora-38-x86_64 \
+  --copr-assume-built "^(glibc|gcc|binutils).*"
 ```
 
 COPR builds include:
@@ -140,6 +141,7 @@ COPR builds include:
 - **Smart Resumption**: Automatically resumes interrupted builds
 - **Chroot Exclusion**: Skip specific architectures/distributions
 - **Build Status Management**: Handles submitted, in-progress, completed, and failed states
+- **Assume Built**: Skip packages matching regex pattern (useful for packages already available in COPR build)
 
 
 ### Null Backend
@@ -244,6 +246,9 @@ Options:
 
       --exclude-chroot <EXCLUDE_CHROOT>
           Exclude chroot for COPR builds (can be specified multiple times)
+
+      --copr-assume-built <COPR_ASSUME_BUILT>
+          Regex pattern for source keys to assume are already built in COPR (skip building)
 
       --debug-prepare
           Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection

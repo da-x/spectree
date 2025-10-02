@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use nutype::nutype;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -320,6 +321,12 @@ struct Args {
         help = "Exclude chroot for COPR builds (can be specified multiple times)"
     )]
     exclude_chroot: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Regex pattern for source keys to assume are already built in COPR (skip building)"
+    )]
+    copr_assume_built: Option<String>,
 
     #[arg(
         long,
@@ -1353,10 +1360,32 @@ async fn build_source_task(
     exclude_chroots: Vec<String>,
     copr_state_mutex: std::sync::Arc<Mutex<()>>,
     debug_prepare: bool,
+    copr_assume_built: Option<String>,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
     info!("🚀 Starting build task");
+
+    // Check if this source should be skipped based on copr_assume_built regex
+    if let Some(pattern) = &copr_assume_built {
+        if backend.is_remote() {
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("Invalid regex pattern for copr_assume_built: {}", pattern))?;
+            
+            if regex.is_match(build_key.source_key.as_ref()) {
+                info!("⏭️  Skipping build for {} (matches copr_assume_built pattern: {})", 
+                      build_key.source_key, pattern);
+                
+                // Notify all waiting tasks that this build is "complete"
+                for sender in direct_completion_senders {
+                    if let Err(e) = sender.send(true).await {
+                        error!("Failed to notify completion: {}", e);
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
 
     // Wait for all dependencies to complete successfully
     for (dep_key, mut receiver) in direct_dependency_receivers {
@@ -1718,6 +1747,7 @@ async fn main() -> Result<()> {
         let task_exclude_chroots = args.exclude_chroot.clone();
         let task_copr_state_mutex = copr_state_mutex.clone();
         let task_debug_prepare = args.debug_prepare;
+        let task_copr_assume_built = args.copr_assume_built.clone();
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
@@ -1734,6 +1764,7 @@ async fn main() -> Result<()> {
                 task_exclude_chroots,
                 task_copr_state_mutex,
                 task_debug_prepare,
+                task_copr_assume_built,
                 direct_dependency_receivers,
                 direct_completion_senders,
             )
