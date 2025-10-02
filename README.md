@@ -305,14 +305,16 @@ There are a lot of ways in which this can be extended.
 
 Here's some of the stuff on the To do:
 
-- [ ] Support RPM build parameters
 - [ ] Allow to specify multiple packages to build in the command line
 - [ ] Allow to limit parallelism
 - [ ] Support more target RPM distributions and versions
 - [ ] Support Debian/Ubuntu packages?
 - [ ] Print the build tree (dry run)
 - [ ] Allow to export the final outputs somewhere else outside the workspace
-
+- [ ] Docker build: save the build log along with the output like 'mock' does
+- [ ] Support build parameters for Copr builds (would mean automatic RPM spec edits)
+- [ ] For Copr builds, support built-pruning direct-only dependencies
+- [ ] Auto-delete failed builds, and add '--keep-failed' argument to disable that.
 
 ## License
 
