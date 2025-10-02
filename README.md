@@ -317,6 +317,9 @@ Here's some of the stuff on the To do:
 - [ ] Docker build: save the build log along with the output like 'mock' does
 - [ ] For Copr builds, support built-pruning direct-only dependencies
 - [ ] For non-remote build, auto-delete failed builds, and add '--keep-failed' argument to disable that.
+- [ ] Allow to prune workspace builds that are not currently in the root set
+- [ ] Docker build emits no output while it is running
+- [ ] Make it clearer in the info prints about missing RPM dependencies
 
 ## License
 
