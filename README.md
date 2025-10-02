@@ -314,12 +314,11 @@ Here's some of the stuff on the To do:
 - [ ] Allow to limit parallelism
 - [ ] Support more target RPM distributions and versions
 - [ ] Support Debian/Ubuntu packages?
-- [ ] Print the build tree (dry run)
+- [ ] Print the build tree (e.g. dry run)
 - [ ] Allow to export the final outputs somewhere else outside the workspace
 - [ ] Docker build: save the build log along with the output like 'mock' does
-- [ ] Support build parameters for Copr builds (would mean automatic RPM spec edits)
 - [ ] For Copr builds, support built-pruning direct-only dependencies
-- [ ] Auto-delete failed builds, and add '--keep-failed' argument to disable that.
+- [ ] For non-remote build, auto-delete failed builds, and add '--keep-failed' argument to disable that.
 
 ## License
 

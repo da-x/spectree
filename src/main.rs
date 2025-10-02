@@ -824,13 +824,15 @@ async fn build_source(
         repo_path
     };
 
-    let srpm_path = generate_initial_srpm(
+    let srpm_path = generate_srpm(
         build_key,
         source,
         target_os,
         &build_dir,
         subpath,
+        "srpm",
         fedpkg_working_dir,
+        false, // use_rpmbuild = false for regular fedpkg generation
     )
     .await?;
 
@@ -869,11 +871,14 @@ async fn build_source(
                 .ok_or_else(|| anyhow::anyhow!("COPR state file is required for COPR backend"))?;
             build_with_copr(
                 build_key,
+                source,
                 &srpm_path,
                 copr_project,
                 exclude_chroots,
                 copr_state_file,
                 copr_state_mutex,
+                &build_dir,
+                target_os,
             )
             .await?;
         }
@@ -894,13 +899,15 @@ async fn build_source(
     Ok(())
 }
 
-async fn generate_initial_srpm(
+async fn generate_srpm(
     build_key: &BuildKey,
     source: &Source,
     target_os: Option<&str>,
     build_dir: &PathBuf,
     subpath: Option<&str>,
+    dirname: &str,
     fedpkg_working_dir: PathBuf,
+    use_rpmbuild: bool,
 ) -> Result<PathBuf, anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -941,21 +948,80 @@ async fn generate_initial_srpm(
         format!(" -- {}", source.params.join(" "))
     };
 
-    let fedpkg_shell = Shell::new(&fedpkg_working_dir);
-    let build_srpm_dir = build_dir.join("srpm");
+    let shell = Shell::new(&fedpkg_working_dir);
+    let build_srpm_dir = build_dir.join(dirname);
     let build_srpm_dir_disp = build_srpm_dir.display();
-    fedpkg_shell
-        .run_with_output(&format!(
-            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}{}",
-            fedpkg_defines, fedpkg_params
-        ))
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to generate SRPM with fedpkg for {}",
-                build_key.source_key
-            )
-        })?;
+
+    if use_rpmbuild {
+        // Use rpmbuild -bs directly (for repacking with baked parameters)
+        info!("Generating SRPM using rpmbuild -bs");
+
+        // Find the spec file
+        let specs_dir = fedpkg_working_dir.join("SPECS");
+        let spec_files: Vec<_> = std::fs::read_dir(&specs_dir)
+            .with_context(|| format!("Failed to read SPECS directory: {}", specs_dir.display()))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension()? == "spec" {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if spec_files.is_empty() {
+            anyhow::bail!("No spec file found for rpmbuild");
+        }
+
+        if spec_files.len() > 1 {
+            anyhow::bail!("Multiple spec files found for rpmbuild: {:?}", spec_files);
+        }
+
+        let spec_file = &spec_files[0];
+
+        shell
+            .run_with_output(&format!(
+                "rpmbuild -bs --define \"_topdir {}\" --define \"_srcrpmdir {}\" \"{}\"",
+                fedpkg_working_dir.display(),
+                build_srpm_dir_disp,
+                spec_file.display()
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to generate SRPM with rpmbuild for {}",
+                    build_key.source_key
+                )
+            })?;
+    } else {
+        // Use fedpkg srpm (original behavior)
+        info!(
+            "Generating source RPM using fedpkg{}{}",
+            subpath
+                .map(|s| format!(" from subpath '{}'", s))
+                .unwrap_or_default(),
+            if is_rhel_packaging {
+                " (RHEL mode)"
+            } else {
+                ""
+            }
+        );
+
+        shell
+            .run_with_output(&format!(
+                "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}{}",
+                fedpkg_defines, fedpkg_params
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to generate SRPM with fedpkg for {}",
+                    build_key.source_key
+                )
+            })?;
+    }
 
     // Find the generated SRPM file
     let srpm_files: Vec<_> = std::fs::read_dir(&build_srpm_dir)
@@ -1171,14 +1237,210 @@ rpmbuild -ba -D "_topdir /workspace/build"{} /workspace/build/SPECS/*.spec
     Ok(())
 }
 
+async fn repack_srpm_with_params(
+    build_key: &BuildKey,
+    source: &Source,
+    srpm_path: &PathBuf,
+    build_dir: &PathBuf,
+    target_os: Option<&str>,
+) -> Result<PathBuf> {
+    let repack_dir = build_dir.join("repack");
+
+    // Remove existing repack directory if it exists
+    if repack_dir.exists() {
+        fs::remove_dir_all(&repack_dir).with_context(|| {
+            format!(
+                "Failed to remove existing repack directory: {}",
+                repack_dir.display()
+            )
+        })?;
+    }
+
+    // Create repack directory
+    fs::create_dir_all(&repack_dir).with_context(|| {
+        format!(
+            "Failed to create repack directory: {}",
+            repack_dir.display()
+        )
+    })?;
+
+    info!("📦 Extracting SRPM to repack directory");
+
+    // Extract SRPM to repack directory using rpm -i
+    let shell = Shell::new(&repack_dir);
+    shell
+        .run_with_output(&format!(
+            "rpm -i --define \"_topdir {}\" \"{}\"",
+            repack_dir.display(),
+            srpm_path.display()
+        ))
+        .await
+        .with_context(|| format!("Failed to extract SRPM: {}", srpm_path.display()))?;
+
+    // Find and edit the spec file
+    let specs_dir = repack_dir.join("SPECS");
+    let spec_files: Vec<_> = std::fs::read_dir(&specs_dir)
+        .with_context(|| format!("Failed to read SPECS directory: {}", specs_dir.display()))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension()? == "spec" {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if spec_files.is_empty() {
+        anyhow::bail!("No spec file found in extracted SRPM");
+    }
+
+    if spec_files.len() > 1 {
+        anyhow::bail!(
+            "Multiple spec files found in extracted SRPM: {:?}",
+            spec_files
+        );
+    }
+
+    let spec_file = &spec_files[0];
+    info!("📝 Editing spec file: {}", spec_file.display());
+
+    // Read and modify spec file
+    let spec_content = fs::read_to_string(spec_file)
+        .with_context(|| format!("Failed to read spec file: {}", spec_file.display()))?;
+
+    let modified_spec_content = modify_spec_for_params(&spec_content, &source.params)?;
+
+    // Write modified spec file
+    fs::write(spec_file, modified_spec_content).with_context(|| {
+        format!(
+            "Failed to write modified spec file: {}",
+            spec_file.display()
+        )
+    })?;
+
+    info!("🔧 Repacking SRPM with modified spec");
+
+    // Repack the SRPM using generate_srpm with rpmbuild
+    let repacked_srpm_path = generate_srpm(
+        build_key,
+        source,
+        target_os,
+        build_dir,
+        None, // subpath = None for repack
+        "srpm-params",
+        repack_dir.clone(),
+        true, // use_rpmbuild = true for repacking with baked parameters
+    )
+    .await?;
+
+    // Clean up repack directory
+    fs::remove_dir_all(&repack_dir).with_context(|| {
+        format!(
+            "Failed to remove repack directory: {}",
+            repack_dir.display()
+        )
+    })?;
+
+    info!("✅ Successfully repacked SRPM with parameters");
+    Ok(repacked_srpm_path)
+}
+
+fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<String> {
+    let lines: Vec<&str> = spec_content.lines().collect();
+    let mut modified_lines = Vec::new();
+
+    // Build parameter map for features to enable/disable
+    let mut with_features = HashSet::new();
+    let mut without_features = HashSet::new();
+
+    let mut i = 0;
+    while i < params.len() {
+        if params[i] == "--with" && i + 1 < params.len() {
+            with_features.insert(params[i + 1].clone());
+            i += 2;
+        } else if params[i] == "--without" && i + 1 < params.len() {
+            without_features.insert(params[i + 1].clone());
+            i += 2;
+        } else {
+            // Skip other parameters (like --define, etc.)
+            i += 1;
+        }
+    }
+
+    // Compile regex patterns for bcond directives
+    let bcond_with_regex = Regex::new(r"^(%bcond_with)[\t ]+([^\t ]+)[\t ]*(.*)")
+        .context("Failed to compile bcond_with regex")?;
+    let bcond_without_regex = Regex::new(r"^(%bcond_without)[\t ]+([^\t ]+)[\t ]*(.*)")
+        .context("Failed to compile bcond_without regex")?;
+
+    // Process each line
+    for line in lines {
+        let mut modified_line = line.to_string();
+
+        // Check for %bcond_with patterns
+        if let Some(captures) = bcond_with_regex.captures(line) {
+            let feature = captures.get(2).unwrap().as_str();
+            let trailing = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+
+            if with_features.contains(feature) {
+                info!(
+                    "🔄 Changing %bcond_with {} to %bcond_without {}",
+                    feature, feature
+                );
+                // Reconstruct the line with %bcond_without
+                if trailing.is_empty() {
+                    modified_line = format!("%bcond_without {}", feature);
+                } else {
+                    modified_line = format!("%bcond_without {} {}", feature, trailing);
+                }
+            }
+        }
+        // Check for %bcond_without patterns
+        else if let Some(captures) = bcond_without_regex.captures(line) {
+            let feature = captures.get(2).unwrap().as_str();
+            let trailing = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+
+            if without_features.contains(feature) {
+                info!(
+                    "🔄 Changing %bcond_without {} to %bcond_with {}",
+                    feature, feature
+                );
+                // Reconstruct the line with %bcond_with
+                if trailing.is_empty() {
+                    modified_line = format!("%bcond_with {}", feature);
+                } else {
+                    modified_line = format!("%bcond_with {} {}", feature, trailing);
+                }
+            }
+        }
+
+        modified_lines.push(modified_line);
+    }
+
+    Ok(modified_lines.join("\n"))
+}
+
 async fn build_with_copr(
     build_key: &BuildKey,
+    source: &Source,
     srpm_path: &PathBuf,
     copr_project: &str,
     exclude_chroots: &[String],
     copr_state_file: &Path,
     state_mutex: &Mutex<()>,
+    build_dir: &PathBuf,
+    target_os: Option<&str>,
 ) -> Result<()> {
+    // Repack SRPM with baked-in build parameters for COPR
+    let final_srpm_path = if !source.params.is_empty() {
+        info!("🔄 Repacking SRPM with build parameters for COPR");
+        repack_srpm_with_params(build_key, source, srpm_path, build_dir, target_os).await?
+    } else {
+        srpm_path.clone()
+    };
+
     // Check if there's an existing build in progress and wait for it
     let existing_build_info = {
         let _guard = state_mutex.lock().await;
@@ -1227,7 +1489,7 @@ async fn build_with_copr(
         "build".to_string(),
         "--nowait".to_string(),
         copr_project.to_string(),
-        srpm_path.to_string_lossy().to_string(),
+        final_srpm_path.to_string_lossy().to_string(),
     ];
 
     // Add exclude-chroot arguments
