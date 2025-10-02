@@ -285,7 +285,7 @@ pub struct SpecTree {
     pub sources: HashMap<SourceKey, Source>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "spectree")]
 #[command(about = "A tool for building dependent RPM packages from a YAML specification")]
 struct Args {
@@ -711,18 +711,12 @@ async fn build_source(
     build_key: &BuildKey,
     source: &Source,
     all_dependencies: &HashMap<SourceKey, BuildHash>,
-    workspace: &Path,
-    backend: &BuilderBackend,
-    target_os: Option<&str>,
-    copr_project: Option<&str>,
-    copr_state_file: Option<&Path>,
-    exclude_chroots: &[String],
+    args: &Args,
     copr_state_mutex: &Mutex<()>,
-    debug_prepare: bool,
 ) -> Result<()> {
     // For remote builds, check Copr state instead of local directories
-    if backend.is_remote() {
-        let copr_state_file = copr_state_file
+    if args.backend.is_remote() {
+        let copr_state_file = args.copr_state_file.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Copr state file is required for remote backend"))?;
 
         // Atomically check build state
@@ -767,7 +761,7 @@ async fn build_source(
         }
     } else {
         // For local builds, check if build directory already exists
-        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
         let build_subdir_final = build_dir_final.join("build");
         if build_subdir_final.exists() {
             info!("Build already exists, skipping");
@@ -775,7 +769,7 @@ async fn build_source(
         }
     }
 
-    let build_dir = workspace
+    let build_dir = args.workspace
         .join("builds")
         .join(format!("{}.tmp", build_key.build_dir_name()));
 
@@ -794,10 +788,10 @@ async fn build_source(
     debug!("Created build subdirectory: {}", build_subdir.display());
 
     // Create build information file
-    create_build_info_file(build_key, source, workspace, &build_subdir)?;
+    create_build_info_file(build_key, source, &args.workspace, &build_subdir)?;
 
     // If there are dependencies, create deps directory and hardlink them (skip for remote builds)
-    if !all_dependencies.is_empty() && !backend.is_remote() {
+    if !all_dependencies.is_empty() && !args.backend.is_remote() {
         let deps_dir = build_dir.join("deps");
         fs::create_dir_all(&deps_dir)
             .with_context(|| format!("Failed to create deps directory: {}", deps_dir.display()))?;
@@ -808,7 +802,7 @@ async fn build_source(
         // Hardlink each dependency's build directory
         for (dep_key, dep_hash) in all_dependencies.iter() {
             let dep_build_key = BuildKey::new(dep_key.clone(), dep_hash.clone());
-            let dep_build_dir = workspace
+            let dep_build_dir = args.workspace
                 .join("builds")
                 .join(dep_build_key.build_dir_name())
                 .join("build");
@@ -840,7 +834,7 @@ async fn build_source(
     }
 
     // Get source repository path
-    let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
+    let repo_path = source.get_repo_path(&build_key.source_key, &args.workspace, false)?;
 
     // Extract subpath from source type if it's a Git source
     let subpath = match &source.typ {
@@ -876,7 +870,7 @@ async fn build_source(
     let srpm_path = generate_srpm(
         build_key,
         source,
-        target_os,
+        args.target_os.as_deref(),
         &build_dir,
         subpath,
         "srpm",
@@ -886,12 +880,12 @@ async fn build_source(
     .await?;
 
     // Build command based on backend
-    match backend {
+    match &args.backend {
         BuilderBackend::Mock => {
             build_with_mock(
                 source,
                 all_dependencies,
-                workspace,
+                &args.workspace,
                 build_dir.clone(),
                 build_subdir,
                 &srpm_path,
@@ -904,19 +898,19 @@ async fn build_source(
         }
         BuilderBackend::Docker => {
             build_under_docker(
-                workspace,
-                target_os,
+                &args.workspace,
+                args.target_os.as_deref(),
                 build_dir.clone(),
                 &source.params,
-                debug_prepare,
+                args.debug_prepare,
             )
             .await
             .with_context(|| format!("Docker build failed for {}", build_key))?;
         }
         BuilderBackend::Copr => {
-            let copr_project = copr_project
+            let copr_project = args.copr_project.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Copr project name is required for Copr backend"))?;
-            let copr_state_file = copr_state_file
+            let copr_state_file = args.copr_state_file.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Copr state file is required for Copr backend"))?;
 
             // If we reach here, we need to submit a new build (state already checked earlier)
@@ -925,19 +919,19 @@ async fn build_source(
                 source,
                 &srpm_path,
                 copr_project,
-                exclude_chroots,
+                &args.exclude_chroot,
                 copr_state_file,
                 copr_state_mutex,
                 &build_dir,
-                target_os,
+                args.target_os.as_deref(),
             )
             .await?;
         }
     }
 
     // For remote builds, we don't need to rename directories since builds happen remotely
-    if !backend.is_remote() {
-        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+    if !args.backend.is_remote() {
+        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
         std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
             format!(
                 "Failed to rename build directory from {} to {}",
@@ -1633,23 +1627,16 @@ async fn build_source_task(
     build_key: BuildKey,
     source: Source,
     all_dependencies: HashMap<SourceKey, BuildHash>,
-    workspace: PathBuf,
-    backend: BuilderBackend,
-    target_os: Option<String>,
-    copr_project: Option<String>,
-    copr_state_file: Option<PathBuf>,
-    exclude_chroots: Vec<String>,
+    args: Args,
     copr_state_mutex: std::sync::Arc<Mutex<()>>,
-    debug_prepare: bool,
-    copr_assume_built: Option<String>,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
     info!("🚀 Starting build task");
 
     // Check if this source should be skipped based on copr_assume_built regex
-    if let Some(pattern) = &copr_assume_built {
-        if backend.is_remote() {
+    if let Some(pattern) = &args.copr_assume_built {
+        if args.backend.is_remote() {
             let regex = Regex::new(pattern).with_context(|| {
                 format!("Invalid regex pattern for copr_assume_built: {}", pattern)
             })?;
@@ -1708,14 +1695,8 @@ async fn build_source_task(
         &build_key,
         &source,
         &all_dependencies,
-        &workspace,
-        &backend,
-        target_os.as_deref(),
-        copr_project.as_deref(),
-        copr_state_file.as_deref(),
-        &exclude_chroots,
+        &args,
         &*copr_state_mutex,
-        debug_prepare,
     )
     .await;
 
@@ -2100,15 +2081,8 @@ async fn main() -> Result<()> {
 
         // Spawn the build task
         let task_source_key = source_key.clone();
-        let task_workspace = args.workspace.clone();
-        let task_backend = args.backend.clone();
-        let task_target_os = args.target_os.clone();
-        let task_copr_project = args.copr_project.clone();
-        let task_copr_state_file = args.copr_state_file.clone();
-        let task_exclude_chroots = args.exclude_chroot.clone();
+        let task_args = args.clone();
         let task_copr_state_mutex = copr_state_mutex.clone();
-        let task_debug_prepare = args.debug_prepare;
-        let task_copr_assume_built = args.copr_assume_built.clone();
 
         let task = tokio::spawn(async move {
             let key = task_source_key.clone();
@@ -2117,15 +2091,8 @@ async fn main() -> Result<()> {
                 task_build_key,
                 source,
                 source_deps,
-                task_workspace,
-                task_backend,
-                task_target_os,
-                task_copr_project,
-                task_copr_state_file,
-                task_exclude_chroots,
+                task_args,
                 task_copr_state_mutex,
-                task_debug_prepare,
-                task_copr_assume_built,
                 direct_dependency_receivers,
                 direct_completion_senders,
             )
