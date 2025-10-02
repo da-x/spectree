@@ -49,6 +49,22 @@ pub(crate) fn get_git_tree_hash(repo_path: &Path, subpath: Option<&str>) -> Resu
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+pub(crate) fn get_git_revision(repo_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(&["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to get git revision: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
 // Helper function to recursively copy directories with hardlinks when possible
 pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     // Remove destination if it exists to ensure clean copy

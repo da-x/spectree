@@ -20,7 +20,7 @@ mod utils;
 
 use shell::Shell;
 
-use crate::utils::{check_git_clean, copy_dir_all, get_git_tree_hash};
+use crate::utils::{check_git_clean, copy_dir_all, get_git_revision, get_git_tree_hash};
 
 fn get_base_os() -> Result<String> {
     let os_release_content = fs::read_to_string("/etc/os-release")?;
@@ -271,6 +271,12 @@ pub struct Source {
     pub dependencies: Vec<SourceKey>,
     #[serde(default)]
     pub params: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildInfo {
+    pub source: Source,
+    pub git_revision: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -662,6 +668,45 @@ fn resolve_dependencies(key: &SourceKey, spec_tree: &SpecTree) -> Result<Vec<Sou
     Ok(resolved)
 }
 
+fn create_build_info_file(
+    build_key: &BuildKey,
+    source: &Source,
+    workspace: &Path,
+    build_dir: &Path,
+) -> Result<()> {
+    let git_revision = match &source.typ {
+        SourceType::Git { .. } => {
+            let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
+            match get_git_revision(&repo_path) {
+                Ok(revision) => Some(revision),
+                Err(e) => {
+                    debug!("Failed to get git revision: {}", e);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let build_info = BuildInfo {
+        source: source.clone(),
+        git_revision,
+    };
+
+    let build_info_path = build_dir.join("build_info.yaml");
+    let build_info_content = serde_yaml::to_string(&build_info)
+        .with_context(|| "Failed to serialize build info to YAML")?;
+    fs::write(&build_info_path, build_info_content).with_context(|| {
+        format!(
+            "Failed to write build info file: {}",
+            build_info_path.display()
+        )
+    })?;
+    debug!("Created build info file: {}", build_info_path.display());
+
+    Ok(())
+}
+
 async fn build_source(
     build_key: &BuildKey,
     source: &Source,
@@ -747,6 +792,9 @@ async fn build_source(
         )
     })?;
     debug!("Created build subdirectory: {}", build_subdir.display());
+
+    // Create build information file
+    create_build_info_file(build_key, source, workspace, &build_subdir)?;
 
     // If there are dependencies, create deps directory and hardlink them (skip for remote builds)
     if !all_dependencies.is_empty() && !backend.is_remote() {
