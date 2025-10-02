@@ -849,13 +849,21 @@ async fn build_source(
             ""
         }
     );
+    // Build the params string for fedpkg srpm (pass as extra args after --)
+    let fedpkg_params = if source.params.is_empty() {
+        String::new()
+    } else {
+        format!(" -- {}", source.params.join(" "))
+    };
+
     let fedpkg_shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join("srpm");
     let build_srpm_dir_disp = build_srpm_dir.display();
     fedpkg_shell
         .run_with_output(&format!(
-            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}",
-            fedpkg_defines
+            "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}{}",
+            fedpkg_defines,
+            fedpkg_params
         ))
         .await
         .with_context(|| {
