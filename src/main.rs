@@ -929,17 +929,6 @@ async fn generate_srpm(
     } else {
         String::new()
     };
-    info!(
-        "Generating source RPM using fedpkg{}{}",
-        subpath
-            .map(|s| format!(" from subpath '{}'", s))
-            .unwrap_or_default(),
-        if is_rhel_packaging {
-            " (RHEL mode)"
-        } else {
-            ""
-        }
-    );
 
     // Build the params string for fedpkg srpm (pass as extra args after --)
     let fedpkg_params = if source.params.is_empty() {
