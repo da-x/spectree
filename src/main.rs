@@ -20,7 +20,7 @@ mod utils;
 
 use shell::Shell;
 
-use crate::utils::{check_git_clean, get_git_tree_hash};
+use crate::utils::{check_git_clean, copy_dir_all, get_git_tree_hash};
 
 fn get_base_os() -> Result<String> {
     let os_release_content = fs::read_to_string("/etc/os-release")?;
@@ -289,8 +289,8 @@ struct Args {
     #[arg(short, long, help = "Workspace directory for builds and Git clones")]
     workspace: PathBuf,
 
-    #[arg(help = "Root source to start building from")]
-    root_source: SourceKey,
+    #[arg(help = "Root sources to start building from (can specify multiple)")]
+    root_sources: Vec<SourceKey>,
 
     #[arg(
         short,
@@ -333,6 +333,12 @@ struct Args {
         help = "Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection. Build will fail intentionally."
     )]
     debug_prepare: bool,
+
+    #[arg(
+        long,
+        help = "Output directory to copy build results (root sources and their dependencies)"
+    )]
+    output_dir: Option<PathBuf>,
 
     #[command(flatten)]
     logging: logging::LoggingArgs,
@@ -766,27 +772,14 @@ async fn build_source(
                 );
             }
 
-            let target_dir = dep_build_key.build_dir_name();
-            shell
-                .run_with_output(&format!("mkdir -p \"{}\"", target_dir))
-                .await
-                .with_context(|| {
-                    format!("Failed to create dependency directory: {}", target_dir)
-                })?;
-            shell
-                .run_with_output(&format!(
-                    "cp -al \"{}\"/* \"{}\"/ 2>/dev/null || true",
+            let target_dir = deps_dir.join(dep_build_key.build_dir_name());
+            copy_dir_all(&dep_build_dir, &target_dir).with_context(|| {
+                format!(
+                    "Failed to copy dependency from {} to {}",
                     dep_build_dir.display(),
-                    target_dir
-                ))
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to hardlink dependency from {} to {}",
-                        dep_build_dir.display(),
-                        target_dir
-                    )
-                })?;
+                    target_dir.display()
+                )
+            })?;
             debug!("Hardlinked dependency {} to deps directory", dep_key);
         }
 
@@ -877,7 +870,7 @@ async fn build_source(
                 .ok_or_else(|| anyhow::anyhow!("Copr project name is required for Copr backend"))?;
             let copr_state_file = copr_state_file
                 .ok_or_else(|| anyhow::anyhow!("Copr state file is required for Copr backend"))?;
-            
+
             // If we reach here, we need to submit a new build (state already checked earlier)
             build_with_copr(
                 build_key,
@@ -1837,18 +1830,24 @@ async fn main() -> Result<()> {
         spec_tree.sources.len()
     );
 
-    // Verify root source exists
-    if !spec_tree.sources.contains_key(&args.root_source) {
-        anyhow::bail!("Root source '{}' not found in spec tree", args.root_source);
+    // Verify all root sources exist
+    if args.root_sources.is_empty() {
+        anyhow::bail!("At least one root source must be specified");
     }
 
-    // Find all dependency pairs starting from the root source
-    let dependency_pairs = find_all_dependency_pairs(&[args.root_source.clone()], &spec_tree)?;
+    for root_source in &args.root_sources {
+        if !spec_tree.sources.contains_key(root_source) {
+            anyhow::bail!("Root source '{}' not found in spec tree", root_source);
+        }
+    }
+
+    // Find all dependency pairs starting from the root sources
+    let dependency_pairs = find_all_dependency_pairs(&args.root_sources, &spec_tree)?;
 
     info!(
-        "Found {} dependency relationships for root source '{}'",
+        "Found {} dependency relationships for {} root sources",
         dependency_pairs.len(),
-        args.root_source
+        args.root_sources.len()
     );
 
     // Log all dependency pairs for visibility
@@ -1857,7 +1856,9 @@ async fn main() -> Result<()> {
     }
 
     let mut all_sources = HashSet::new();
-    all_sources.insert(args.root_source.clone());
+    for root_source in &args.root_sources {
+        all_sources.insert(root_source.clone());
+    }
     for (source, dependency) in &dependency_pairs {
         all_sources.insert(source.clone());
         all_sources.insert(dependency.clone());
@@ -2034,22 +2035,33 @@ async fn main() -> Result<()> {
 
     info!("Leaf sources (no one depends on them): {:?}", leaf_sources);
 
-    // Wait for leaf sources to complete (or root source if it's specified and is a leaf)
-    let sources_to_wait_for = if leaf_sources.contains(&args.root_source) {
-        vec![args.root_source.clone()]
-    } else {
-        leaf_sources
-    };
+    // Wait for leaf sources to complete (or root sources if they are specified and are leaves)
+    let mut sources_to_wait_for = Vec::new();
+    for root_source in &args.root_sources {
+        if leaf_sources.contains(root_source) {
+            sources_to_wait_for.push(root_source.clone());
+        }
+    }
+
+    // If none of the root sources are leaves, wait for all leaf sources
+    if sources_to_wait_for.is_empty() {
+        sources_to_wait_for = leaf_sources;
+    }
 
     info!("Waiting for sources to complete: {:?}", sources_to_wait_for);
 
+    let mut completed_root_sources = HashSet::new();
     for (source_key, task) in source_tasks {
         if sources_to_wait_for.contains(&source_key) {
             match task.await {
                 Ok(Ok(())) => {
                     info!("✅ Source '{}' completed successfully!", source_key);
-                    if source_key == args.root_source {
-                        break; // Root source completed, we're done
+                    if args.root_sources.contains(&source_key) {
+                        completed_root_sources.insert(source_key.clone());
+                        // Check if all root sources are completed
+                        if completed_root_sources.len() == args.root_sources.len() {
+                            break; // All root sources completed, we're done
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -2062,5 +2074,85 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Copy build results to output directory if specified
+    if let Some(output_dir) = &args.output_dir {
+        copy_build_results_to_output_dir(
+            output_dir,
+            &args.root_sources,
+            &all_dependencies_map,
+            &build_hashes,
+            &args.workspace,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn copy_build_results_to_output_dir(
+    output_dir: &Path,
+    root_sources: &[SourceKey],
+    all_dependencies_map: &HashMap<SourceKey, HashMap<SourceKey, BuildHash>>,
+    build_hashes: &HashMap<SourceKey, BuildHash>,
+    workspace: &Path,
+) -> Result<()> {
+    info!(
+        "Copying build results to output directory: {}",
+        output_dir.display()
+    );
+
+    // Create output directory if it doesn't exist
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    // Collect all sources to copy: root sources and their dependencies
+    let mut sources_to_copy = HashSet::new();
+
+    // Add all root sources
+    for root_source in root_sources {
+        sources_to_copy.insert(root_source.clone());
+
+        // Add all dependencies of this root source
+        if let Some(dependencies) = all_dependencies_map.get(root_source) {
+            for dep_key in dependencies.keys() {
+                sources_to_copy.insert(dep_key.clone());
+            }
+        }
+    }
+
+    // Copy each source's build directory
+    for source_key in sources_to_copy {
+        let build_hash = build_hashes.get(&source_key).unwrap();
+        let build_key = BuildKey::new(source_key.clone(), build_hash.clone());
+        let source_build_dir = workspace.join("builds").join(build_key.build_dir_name());
+
+        if source_build_dir.exists() {
+            let dest_dir = output_dir.join(build_key.build_dir_name());
+            info!(
+                "Copying {} to {}",
+                source_build_dir.display(),
+                dest_dir.display()
+            );
+
+            // Copy the entire build directory
+            copy_dir_all(&source_build_dir, &dest_dir).with_context(|| {
+                format!(
+                    "Failed to copy build directory from {} to {}",
+                    source_build_dir.display(),
+                    dest_dir.display()
+                )
+            })?;
+        } else {
+            info!(
+                "Build directory does not exist (remote build?): {}",
+                source_build_dir.display()
+            );
+        }
+    }
+
+    info!("✅ Build results copied to output directory successfully!");
     Ok(())
 }

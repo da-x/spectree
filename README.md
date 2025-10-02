@@ -310,12 +310,10 @@ There are a lot of ways in which this can be extended.
 
 Here's some of the stuff on the To do:
 
-- [ ] Allow to specify multiple packages to build in the command line
 - [ ] Allow to limit parallelism
 - [ ] Support more target RPM distributions and versions
 - [ ] Support Debian/Ubuntu packages?
 - [ ] Print the build tree (e.g. dry run)
-- [ ] Allow to export the final outputs somewhere else outside the workspace
 - [ ] Docker build: save the build log along with the output like 'mock' does
 - [ ] For Copr builds, support built-pruning direct-only dependencies
 - [ ] For non-remote build, auto-delete failed builds, and add '--keep-failed' argument to disable that.
