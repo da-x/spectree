@@ -691,18 +691,26 @@ async fn build_source(
                     return Ok(());
                 }
                 CoprBuildStatus::Failed => {
-                    anyhow::bail!(
-                        "Remote build {} failed for {}",
-                        existing_build.build_id,
-                        build_key
+                    info!(
+                        "Previous Copr build {} failed for {}, will retry",
+                        existing_build.build_id, build_key
                     );
+                    // Continue to generate SRPM and submit new build
                 }
                 CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
                     info!(
-                        "Remote build {} is in progress for {}, will wait later",
+                        "Copr build {} is in progress for {}, waiting...",
                         existing_build.build_id, build_key
                     );
-                    // Continue with the process - we'll wait in the backend-specific code
+                    // Wait for existing build (no SRPM generation needed)
+                    wait_for_copr_build(
+                        existing_build.build_id,
+                        build_key,
+                        copr_state_file,
+                        copr_state_mutex,
+                    )
+                    .await?;
+                    return Ok(());
                 }
             }
         }
@@ -869,6 +877,8 @@ async fn build_source(
                 .ok_or_else(|| anyhow::anyhow!("Copr project name is required for Copr backend"))?;
             let copr_state_file = copr_state_file
                 .ok_or_else(|| anyhow::anyhow!("Copr state file is required for Copr backend"))?;
+            
+            // If we reach here, we need to submit a new build (state already checked earlier)
             build_with_copr(
                 build_key,
                 source,
@@ -1422,47 +1432,6 @@ async fn build_with_copr(
     build_dir: &PathBuf,
     target_os: Option<&str>,
 ) -> Result<()> {
-    // Check if there's an existing build in progress and wait for it
-    let existing_build_info = {
-        let _guard = state_mutex.lock().await;
-        let state = CoprStateFile::load_or_create(copr_state_file)?;
-        state.get_build_state(build_key).cloned()
-    };
-
-    if let Some(existing_build) = existing_build_info {
-        match existing_build.status {
-            CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
-                info!(
-                    "Copr build {} is in progress for {}, waiting...",
-                    existing_build.build_id, build_key
-                );
-                // Wait for existing build
-                return wait_for_copr_build(
-                    existing_build.build_id,
-                    build_key,
-                    copr_state_file,
-                    state_mutex,
-                )
-                .await;
-            }
-            CoprBuildStatus::Failed => {
-                info!(
-                    "Previous Copr build {} failed for {}, retrying",
-                    existing_build.build_id, build_key
-                );
-                // Continue to submit new build
-            }
-            CoprBuildStatus::Completed => {
-                // This should not happen as it's checked earlier, but handle gracefully
-                info!(
-                    "Copr build {} already completed for {}",
-                    existing_build.build_id, build_key
-                );
-                return Ok(());
-            }
-        }
-    }
-
     // Repack SRPM with baked-in build parameters for Copr
     let final_srpm_path = if !source.params.is_empty() {
         info!("🔄 Repacking SRPM with build parameters for Copr");
