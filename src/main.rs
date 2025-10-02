@@ -1841,6 +1841,75 @@ fn compute_build_hash_recursive(
     Ok(build_hash)
 }
 
+fn copy_build_results_to_output_dir(
+    output_dir: &Path,
+    root_sources: &[SourceKey],
+    all_dependencies_map: &HashMap<SourceKey, HashMap<SourceKey, BuildHash>>,
+    build_hashes: &HashMap<SourceKey, BuildHash>,
+    workspace: &Path,
+) -> Result<()> {
+    info!(
+        "Copying build results to output directory: {}",
+        output_dir.display()
+    );
+
+    // Create output directory if it doesn't exist
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    // Collect all sources to copy: root sources and their dependencies
+    let mut sources_to_copy = HashSet::new();
+
+    // Add all root sources
+    for root_source in root_sources {
+        sources_to_copy.insert(root_source.clone());
+
+        // Add all dependencies of this root source
+        if let Some(dependencies) = all_dependencies_map.get(root_source) {
+            for dep_key in dependencies.keys() {
+                sources_to_copy.insert(dep_key.clone());
+            }
+        }
+    }
+
+    // Copy each source's build directory
+    for source_key in sources_to_copy {
+        let build_hash = build_hashes.get(&source_key).unwrap();
+        let build_key = BuildKey::new(source_key.clone(), build_hash.clone());
+        let source_build_dir = workspace.join("builds").join(build_key.build_dir_name());
+
+        if source_build_dir.exists() {
+            let dest_dir = output_dir.join(build_key.build_dir_name());
+            info!(
+                "Copying {} to {}",
+                source_build_dir.display(),
+                dest_dir.display()
+            );
+
+            // Copy the entire build directory
+            copy_dir_all(&source_build_dir, &dest_dir).with_context(|| {
+                format!(
+                    "Failed to copy build directory from {} to {}",
+                    source_build_dir.display(),
+                    dest_dir.display()
+                )
+            })?;
+        } else {
+            info!(
+                "Build directory does not exist (remote build?): {}",
+                source_build_dir.display()
+            );
+        }
+    }
+
+    info!("✅ Build results copied to output directory successfully!");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -2133,74 +2202,5 @@ async fn main() -> Result<()> {
         )?;
     }
 
-    Ok(())
-}
-
-fn copy_build_results_to_output_dir(
-    output_dir: &Path,
-    root_sources: &[SourceKey],
-    all_dependencies_map: &HashMap<SourceKey, HashMap<SourceKey, BuildHash>>,
-    build_hashes: &HashMap<SourceKey, BuildHash>,
-    workspace: &Path,
-) -> Result<()> {
-    info!(
-        "Copying build results to output directory: {}",
-        output_dir.display()
-    );
-
-    // Create output directory if it doesn't exist
-    std::fs::create_dir_all(output_dir).with_context(|| {
-        format!(
-            "Failed to create output directory: {}",
-            output_dir.display()
-        )
-    })?;
-
-    // Collect all sources to copy: root sources and their dependencies
-    let mut sources_to_copy = HashSet::new();
-
-    // Add all root sources
-    for root_source in root_sources {
-        sources_to_copy.insert(root_source.clone());
-
-        // Add all dependencies of this root source
-        if let Some(dependencies) = all_dependencies_map.get(root_source) {
-            for dep_key in dependencies.keys() {
-                sources_to_copy.insert(dep_key.clone());
-            }
-        }
-    }
-
-    // Copy each source's build directory
-    for source_key in sources_to_copy {
-        let build_hash = build_hashes.get(&source_key).unwrap();
-        let build_key = BuildKey::new(source_key.clone(), build_hash.clone());
-        let source_build_dir = workspace.join("builds").join(build_key.build_dir_name());
-
-        if source_build_dir.exists() {
-            let dest_dir = output_dir.join(build_key.build_dir_name());
-            info!(
-                "Copying {} to {}",
-                source_build_dir.display(),
-                dest_dir.display()
-            );
-
-            // Copy the entire build directory
-            copy_dir_all(&source_build_dir, &dest_dir).with_context(|| {
-                format!(
-                    "Failed to copy build directory from {} to {}",
-                    source_build_dir.display(),
-                    dest_dir.display()
-                )
-            })?;
-        } else {
-            info!(
-                "Build directory does not exist (remote build?): {}",
-                source_build_dir.display()
-            );
-        }
-    }
-
-    info!("✅ Build results copied to output directory successfully!");
     Ok(())
 }
