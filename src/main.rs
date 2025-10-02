@@ -1422,14 +1422,6 @@ async fn build_with_copr(
     build_dir: &PathBuf,
     target_os: Option<&str>,
 ) -> Result<()> {
-    // Repack SRPM with baked-in build parameters for COPR
-    let final_srpm_path = if !source.params.is_empty() {
-        info!("🔄 Repacking SRPM with build parameters for COPR");
-        repack_srpm_with_params(build_key, source, srpm_path, build_dir, target_os).await?
-    } else {
-        srpm_path.clone()
-    };
-
     // Check if there's an existing build in progress and wait for it
     let existing_build_info = {
         let _guard = state_mutex.lock().await;
@@ -1470,6 +1462,14 @@ async fn build_with_copr(
             }
         }
     }
+
+    // Repack SRPM with baked-in build parameters for COPR
+    let final_srpm_path = if !source.params.is_empty() {
+        info!("🔄 Repacking SRPM with build parameters for COPR");
+        repack_srpm_with_params(build_key, source, srpm_path, build_dir, target_os).await?
+    } else {
+        srpm_path.clone()
+    };
 
     // Submit new build
     info!("Submitting COPR build for {}", build_key);
