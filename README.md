@@ -9,9 +9,9 @@ I used this to solve the following problem: given a tree of source RPMs, which d
 
 - **Dependency Management**: Automatically resolves and builds packages in correct dependency order
 - **Parallel Builds**: Concurrent execution of independent builds
-- **Multiple Backends**: Support for Mock, Docker, and COPR backends
+- **Multiple Backends**: Support for Mock, Docker, and Copr backends
 - **Smart Caching**: Avoids rebuilding packages that haven't changed
-- **Remote Builds**: Full support for Fedora COPR remote builds with state tracking
+- **Remote Builds**: Full support for Fedora Copr remote builds with state tracking
 - **Debug Mode**: Special debug mode for patching up packages (stop after `rpmbuild -bp`).
 
 
@@ -124,8 +124,8 @@ spectree packages.yaml /workspace app --backend docker --debug-prepare
 
 This runs `rpmbuild -bp` (prepare only), prints the prepared source path, and intentionally fails so you can inspect the BUILD directory.
 
-### COPR Backend
-Submits builds to Fedora COPR for remote building:
+### Copr Backend
+Submits builds to Fedora Copr for remote building:
 
 ```bash
 spectree packages.yaml /workspace app \
@@ -136,12 +136,12 @@ spectree packages.yaml /workspace app \
   --copr-assume-built "^(glibc|gcc|binutils).*"
 ```
 
-COPR builds include:
+Copr builds include:
 - **State Tracking**: Persistent state file tracks build status across runs
 - **Smart Resumption**: Automatically resumes interrupted builds
 - **Chroot Exclusion**: Skip specific architectures/distributions
 - **Build Status Management**: Handles submitted, in-progress, completed, and failed states
-- **Assume Built**: Skip packages matching regex pattern (useful for packages already available in COPR build)
+- **Assume Built**: Skip packages matching regex pattern (useful for packages already available in Copr build)
 
 
 ### Null Backend
@@ -238,17 +238,17 @@ Options:
       --target-os <TARGET_OS>
           Target OS for Docker backend (e.g., fedora-39, centos-stream-9)
 
-      --copr-project <COPR_PROJECT>
-          COPR project name (required for COPR backend)
+      --copr-project <Copr_PROJECT>
+          Copr project name (required for Copr backend)
 
-      --copr-state-file <COPR_STATE_FILE>
-          YAML file to store COPR build state mappings (required for COPR backend)
+      --copr-state-file <Copr_STATE_FILE>
+          YAML file to store Copr build state mappings (required for Copr backend)
 
       --exclude-chroot <EXCLUDE_CHROOT>
-          Exclude chroot for COPR builds (can be specified multiple times)
+          Exclude chroot for Copr builds (can be specified multiple times)
 
-      --copr-assume-built <COPR_ASSUME_BUILT>
-          Regex pattern for source keys to assume are already built in COPR (skip building)
+      --copr-assume-built <Copr_ASSUME_BUILT>
+          Regex pattern for source keys to assume are already built in Copr (skip building)
 
       --debug-prepare
           Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection
@@ -278,9 +278,9 @@ workspace/
 ```
 
 
-### Remote Builds (COPR)
+### Remote Builds (Copr)
 
-Build artifacts remain on COPR infrastructure. Local workspace only contains source preparation, in that case `builds/` is not maintained and we only need to clone source RPMs from Git if we are working with remotes.
+Build artifacts remain on Copr infrastructure. Local workspace only contains source preparation, in that case `builds/` is not maintained and we only need to clone source RPMs from Git if we are working with remotes.
 
 
 ## Advanced Features
@@ -301,7 +301,7 @@ Only packages with changed hashes are rebuilt, making incremental builds very fa
 - Git
 - For Mock backend: Mock, createrepo_c
 - For Docker backend: Docker, createrepo_c
-- For COPR backend: copr-cli
+- For Copr backend: copr-cli
 
 
 ## Limitations and To Dos

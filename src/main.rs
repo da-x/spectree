@@ -235,9 +235,9 @@ impl CoprStateFile {
     pub fn load_or_create(path: &Path) -> Result<Self> {
         if path.exists() {
             let content = fs::read_to_string(path)
-                .with_context(|| format!("Failed to read COPR state file: {}", path.display()))?;
+                .with_context(|| format!("Failed to read Copr state file: {}", path.display()))?;
             serde_yaml::from_str(&content)
-                .with_context(|| format!("Failed to parse COPR state file: {}", path.display()))
+                .with_context(|| format!("Failed to parse Copr state file: {}", path.display()))
         } else {
             Ok(Self {
                 builds: Default::default(),
@@ -247,9 +247,9 @@ impl CoprStateFile {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let content =
-            serde_yaml::to_string(self).context("Failed to serialize COPR state to YAML")?;
+            serde_yaml::to_string(self).context("Failed to serialize Copr state to YAML")?;
         fs::write(path, content)
-            .with_context(|| format!("Failed to write COPR state file: {}", path.display()))?;
+            .with_context(|| format!("Failed to write Copr state file: {}", path.display()))?;
         Ok(())
     }
 
@@ -306,25 +306,25 @@ struct Args {
     )]
     target_os: Option<String>,
 
-    #[arg(long, help = "COPR project name (required for COPR backend)")]
+    #[arg(long, help = "Copr project name (required for Copr backend)")]
     copr_project: Option<String>,
 
     #[arg(
         long,
-        help = "YAML file to store COPR build state mappings (required for COPR backend)"
+        help = "YAML file to store Copr build state mappings (required for Copr backend)"
     )]
     copr_state_file: Option<PathBuf>,
 
     #[arg(
         long,
         action = clap::ArgAction::Append,
-        help = "Exclude chroot for COPR builds (can be specified multiple times)"
+        help = "Exclude chroot for Copr builds (can be specified multiple times)"
     )]
     exclude_chroot: Vec<String>,
 
     #[arg(
         long,
-        help = "Regex pattern for source keys to assume are already built in COPR (skip building)"
+        help = "Regex pattern for source keys to assume are already built in Copr (skip building)"
     )]
     copr_assume_built: Option<String>,
 
@@ -669,10 +669,10 @@ async fn build_source(
     copr_state_mutex: &Mutex<()>,
     debug_prepare: bool,
 ) -> Result<()> {
-    // For remote builds, check COPR state instead of local directories
+    // For remote builds, check Copr state instead of local directories
     if backend.is_remote() {
         let copr_state_file = copr_state_file
-            .ok_or_else(|| anyhow::anyhow!("COPR state file is required for remote backend"))?;
+            .ok_or_else(|| anyhow::anyhow!("Copr state file is required for remote backend"))?;
 
         // Atomically check build state
         let existing_build_info = {
@@ -866,9 +866,9 @@ async fn build_source(
         }
         BuilderBackend::Copr => {
             let copr_project = copr_project
-                .ok_or_else(|| anyhow::anyhow!("COPR project name is required for COPR backend"))?;
+                .ok_or_else(|| anyhow::anyhow!("Copr project name is required for Copr backend"))?;
             let copr_state_file = copr_state_file
-                .ok_or_else(|| anyhow::anyhow!("COPR state file is required for COPR backend"))?;
+                .ok_or_else(|| anyhow::anyhow!("Copr state file is required for Copr backend"))?;
             build_with_copr(
                 build_key,
                 source,
@@ -1433,7 +1433,7 @@ async fn build_with_copr(
         match existing_build.status {
             CoprBuildStatus::Submitted | CoprBuildStatus::InProgress => {
                 info!(
-                    "COPR build {} is in progress for {}, waiting...",
+                    "Copr build {} is in progress for {}, waiting...",
                     existing_build.build_id, build_key
                 );
                 // Wait for existing build
@@ -1447,7 +1447,7 @@ async fn build_with_copr(
             }
             CoprBuildStatus::Failed => {
                 info!(
-                    "Previous COPR build {} failed for {}, retrying",
+                    "Previous Copr build {} failed for {}, retrying",
                     existing_build.build_id, build_key
                 );
                 // Continue to submit new build
@@ -1455,7 +1455,7 @@ async fn build_with_copr(
             CoprBuildStatus::Completed => {
                 // This should not happen as it's checked earlier, but handle gracefully
                 info!(
-                    "COPR build {} already completed for {}",
+                    "Copr build {} already completed for {}",
                     existing_build.build_id, build_key
                 );
                 return Ok(());
@@ -1463,16 +1463,16 @@ async fn build_with_copr(
         }
     }
 
-    // Repack SRPM with baked-in build parameters for COPR
+    // Repack SRPM with baked-in build parameters for Copr
     let final_srpm_path = if !source.params.is_empty() {
-        info!("🔄 Repacking SRPM with build parameters for COPR");
+        info!("🔄 Repacking SRPM with build parameters for Copr");
         repack_srpm_with_params(build_key, source, srpm_path, build_dir, target_os).await?
     } else {
         srpm_path.clone()
     };
 
     // Submit new build
-    info!("Submitting COPR build for {}", build_key);
+    info!("Submitting Copr build for {}", build_key);
     let mut copr_cmd = vec![
         "copr".to_string(),
         "build".to_string(),
@@ -1488,18 +1488,18 @@ async fn build_with_copr(
     }
 
     let copr_command = copr_cmd.join(" ");
-    info!("Executing COPR command: {}", copr_command);
+    info!("Executing Copr command: {}", copr_command);
 
     let current_dir = std::env::current_dir().context("Failed to get current working directory")?;
     let shell = Shell::new(current_dir.as_path());
     let output = shell
         .run_with_output(&copr_command)
         .await
-        .with_context(|| format!("Failed to execute COPR build command: {}", copr_command))?;
+        .with_context(|| format!("Failed to execute Copr build command: {}", copr_command))?;
 
     // Parse build ID from output
     let build_id = extract_copr_build_id(&output)?;
-    info!("COPR build submitted with ID: {}", build_id);
+    info!("Copr build submitted with ID: {}", build_id);
 
     // Atomically save build state
     {
@@ -1524,7 +1524,7 @@ async fn wait_for_copr_build(
     copr_state_file: &Path,
     state_mutex: &Mutex<()>,
 ) -> Result<()> {
-    info!("Waiting for COPR build {} to complete", build_id);
+    info!("Waiting for Copr build {} to complete", build_id);
 
     // Atomically update status to InProgress
     {
@@ -1543,10 +1543,10 @@ async fn wait_for_copr_build(
     match shell
         .run_with_output(&watch_command)
         .await
-        .with_context(|| format!("Failed to execute COPR watch command: {}", watch_command))
+        .with_context(|| format!("Failed to execute Copr watch command: {}", watch_command))
     {
         Ok(_) => {
-            info!("✅ COPR build {} completed successfully", build_id);
+            info!("✅ Copr build {} completed successfully", build_id);
             // Atomically update status to Completed
             {
                 let _guard = state_mutex.lock().await;
@@ -1559,7 +1559,7 @@ async fn wait_for_copr_build(
             Ok(())
         }
         Err(e) => {
-            error!("❌ COPR build {} failed: {}", build_id, e);
+            error!("❌ Copr build {} failed: {}", build_id, e);
             // Atomically update status to Failed
             {
                 let _guard = state_mutex.lock().await;
@@ -1583,7 +1583,7 @@ fn extract_copr_build_id(output: &str) -> Result<u64> {
                 .map_err(|e| anyhow::anyhow!("Failed to parse build ID '{}': {}", id_str, e));
         }
     }
-    anyhow::bail!("No 'Created builds:' line found in COPR output");
+    anyhow::bail!("No 'Created builds:' line found in Copr output");
 }
 
 async fn build_with_mock(
@@ -1841,13 +1841,13 @@ async fn main() -> Result<()> {
     // Always create the mutex (simpler than conditional logic)
     let copr_state_mutex = std::sync::Arc::new(Mutex::new(()));
 
-    // Validate COPR arguments if using COPR backend
+    // Validate Copr arguments if using Copr backend
     if args.backend == BuilderBackend::Copr {
         if args.copr_project.is_none() {
-            anyhow::bail!("--copr-project is required when using COPR backend");
+            anyhow::bail!("--copr-project is required when using Copr backend");
         }
         if args.copr_state_file.is_none() {
-            anyhow::bail!("--copr-state-file is required when using COPR backend");
+            anyhow::bail!("--copr-state-file is required when using Copr backend");
         }
     }
 
