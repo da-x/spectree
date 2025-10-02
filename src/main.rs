@@ -824,6 +824,84 @@ async fn build_source(
         repo_path
     };
 
+    let srpm_path = generate_initial_srpm(
+        build_key,
+        source,
+        target_os,
+        &build_dir,
+        subpath,
+        fedpkg_working_dir,
+    )
+    .await?;
+
+    // Build command based on backend
+    match backend {
+        BuilderBackend::Mock => {
+            build_with_mock(
+                source,
+                all_dependencies,
+                workspace,
+                build_dir.clone(),
+                build_subdir,
+                &srpm_path,
+            )
+            .await?;
+        }
+        BuilderBackend::Null => {
+            info!("🚫 Null backend");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        BuilderBackend::Docker => {
+            build_under_docker(
+                workspace,
+                target_os,
+                build_dir.clone(),
+                &source.params,
+                debug_prepare,
+            )
+            .await
+            .with_context(|| format!("Docker build failed for {}", build_key))?;
+        }
+        BuilderBackend::Copr => {
+            let copr_project = copr_project
+                .ok_or_else(|| anyhow::anyhow!("COPR project name is required for COPR backend"))?;
+            let copr_state_file = copr_state_file
+                .ok_or_else(|| anyhow::anyhow!("COPR state file is required for COPR backend"))?;
+            build_with_copr(
+                build_key,
+                &srpm_path,
+                copr_project,
+                exclude_chroots,
+                copr_state_file,
+                copr_state_mutex,
+            )
+            .await?;
+        }
+    }
+
+    // For remote builds, we don't need to rename directories since builds happen remotely
+    if !backend.is_remote() {
+        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
+        std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
+            format!(
+                "Failed to rename build directory from {} to {}",
+                build_dir.display(),
+                build_dir_final.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn generate_initial_srpm(
+    build_key: &BuildKey,
+    source: &Source,
+    target_os: Option<&str>,
+    build_dir: &PathBuf,
+    subpath: Option<&str>,
+    fedpkg_working_dir: PathBuf,
+) -> Result<PathBuf, anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
         None => get_base_os()?,
@@ -844,7 +922,6 @@ async fn build_source(
     } else {
         String::new()
     };
-
     info!(
         "Generating source RPM using fedpkg{}{}",
         subpath
@@ -856,6 +933,7 @@ async fn build_source(
             ""
         }
     );
+
     // Build the params string for fedpkg srpm (pass as extra args after --)
     let fedpkg_params = if source.params.is_empty() {
         String::new()
@@ -869,8 +947,7 @@ async fn build_source(
     fedpkg_shell
         .run_with_output(&format!(
             "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}{}",
-            fedpkg_defines,
-            fedpkg_params
+            fedpkg_defines, fedpkg_params
         ))
         .await
         .with_context(|| {
@@ -912,66 +989,9 @@ async fn build_source(
     }
 
     let srpm_path = &srpm_files[0];
+
     debug!("Found source RPM: {}", srpm_path.display());
-
-    // Build command based on backend
-    match backend {
-        BuilderBackend::Mock => {
-            build_with_mock(
-                source,
-                all_dependencies,
-                workspace,
-                build_dir.clone(),
-                build_subdir,
-                srpm_path,
-            )
-            .await?;
-        }
-        BuilderBackend::Null => {
-            info!("🚫 Null backend");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        BuilderBackend::Docker => {
-            build_under_docker(
-                workspace,
-                target_os,
-                build_dir.clone(),
-                &source.params,
-                debug_prepare,
-            )
-            .await
-            .with_context(|| format!("Docker build failed for {}", build_key))?;
-        }
-        BuilderBackend::Copr => {
-            let copr_project = copr_project
-                .ok_or_else(|| anyhow::anyhow!("COPR project name is required for COPR backend"))?;
-            let copr_state_file = copr_state_file
-                .ok_or_else(|| anyhow::anyhow!("COPR state file is required for COPR backend"))?;
-            build_with_copr(
-                build_key,
-                srpm_path,
-                copr_project,
-                exclude_chroots,
-                copr_state_file,
-                copr_state_mutex,
-            )
-            .await?;
-        }
-    }
-
-    // For remote builds, we don't need to rename directories since builds happen remotely
-    if !backend.is_remote() {
-        let build_dir_final = workspace.join("builds").join(build_key.build_dir_name());
-        std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
-            format!(
-                "Failed to rename build directory from {} to {}",
-                build_dir.display(),
-                build_dir_final.display()
-            )
-        })?;
-    }
-
-    Ok(())
+    Ok(srpm_path.clone())
 }
 
 async fn build_under_docker(
@@ -1369,13 +1389,16 @@ async fn build_source_task(
     // Check if this source should be skipped based on copr_assume_built regex
     if let Some(pattern) = &copr_assume_built {
         if backend.is_remote() {
-            let regex = Regex::new(pattern)
-                .with_context(|| format!("Invalid regex pattern for copr_assume_built: {}", pattern))?;
-            
+            let regex = Regex::new(pattern).with_context(|| {
+                format!("Invalid regex pattern for copr_assume_built: {}", pattern)
+            })?;
+
             if regex.is_match(build_key.source_key.as_ref()) {
-                info!("⏭️  Skipping build for {} (matches copr_assume_built pattern: {})", 
-                      build_key.source_key, pattern);
-                
+                info!(
+                    "⏭️  Skipping build for {} (matches copr_assume_built pattern: {})",
+                    build_key.source_key, pattern
+                );
+
                 // Notify all waiting tasks that this build is "complete"
                 for sender in direct_completion_senders {
                     if let Err(e) = sender.send(true).await {
