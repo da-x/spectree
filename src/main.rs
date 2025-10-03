@@ -668,6 +668,15 @@ fn resolve_dependencies(key: &SourceKey, spec_tree: &SpecTree) -> Result<Vec<Sou
     Ok(resolved)
 }
 
+fn format_params_for_command(params: &[String], prefix: &str) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        let escaped_params: Vec<String> = params.iter().map(|p| format!("{:?}", p)).collect();
+        format!("{}{}", prefix, escaped_params.join(" "))
+    }
+}
+
 fn create_build_info_file(
     build_key: &BuildKey,
     source: &Source,
@@ -976,11 +985,7 @@ async fn generate_srpm(
     };
 
     // Build the params string for fedpkg srpm (pass as extra args after --)
-    let fedpkg_params = if source.params.is_empty() {
-        String::new()
-    } else {
-        format!(" -- {}", source.params.join(" "))
-    };
+    let fedpkg_params = format_params_for_command(&source.params, " -- ");
 
     let shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join(dirname);
@@ -1123,11 +1128,7 @@ async fn build_under_docker(
     );
 
     // Build the params string for rpmbuild
-    let params_str = if params.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", params.join(" "))
-    };
+    let params_str = format_params_for_command(params, " ");
 
     let missing_deps = shell
         .run_with_output(&format!(
