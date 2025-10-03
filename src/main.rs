@@ -1386,9 +1386,10 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
     let lines: Vec<&str> = spec_content.lines().collect();
     let mut modified_lines = Vec::new();
 
-    // Build parameter map for features to enable/disable
+    // Build parameter maps for features to enable/disable and defines to set
     let mut with_features = HashSet::new();
     let mut without_features = HashSet::new();
+    let mut defines = HashMap::new();
 
     let mut i = 0;
     while i < params.len() {
@@ -1398,17 +1399,31 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
         } else if params[i] == "--without" && i + 1 < params.len() {
             without_features.insert(params[i + 1].clone());
             i += 2;
+        } else if (params[i] == "--define" || params[i] == "-D") && i + 1 < params.len() {
+            // Parse define parameter: "name value"
+            let define_str = &params[i + 1];
+            if let Some(space_pos) = define_str.find(' ') {
+                let name = define_str[..space_pos].trim().to_string();
+                let value = define_str[space_pos + 1..].trim().to_string();
+                defines.insert(name, value);
+            } else {
+                // No value provided, set to empty string
+                defines.insert(define_str.trim().to_string(), String::new());
+            }
+            i += 2;
         } else {
-            // Skip other parameters (like --define, etc.)
+            // Skip other parameters
             i += 1;
         }
     }
 
-    // Compile regex patterns for bcond directives
+    // Compile regex patterns for bcond directives and %global definitions
     let bcond_with_regex = Regex::new(r"^(%bcond_with)[\t ]+([^\t ]+)[\t ]*(.*)")
         .context("Failed to compile bcond_with regex")?;
     let bcond_without_regex = Regex::new(r"^(%bcond_without)[\t ]+([^\t ]+)[\t ]*(.*)")
         .context("Failed to compile bcond_without regex")?;
+    let global_regex = Regex::new(r"^(%global)[\t ]+([^\t ]+)[\t ]+(.*)")
+        .context("Failed to compile global regex")?;
 
     // Process each line
     for line in lines {
@@ -1448,6 +1463,18 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
                 } else {
                     modified_line = format!("%bcond_with {} {}", feature, trailing);
                 }
+            }
+        }
+        // Check for %global patterns
+        else if let Some(captures) = global_regex.captures(line) {
+            let var_name = captures.get(2).unwrap().as_str();
+            
+            if let Some(new_value) = defines.get(var_name) {
+                info!(
+                    "🔄 Replacing %global {} with new value: {}",
+                    var_name, new_value
+                );
+                modified_line = format!("%global {} {}", var_name, new_value);
             }
         }
 
