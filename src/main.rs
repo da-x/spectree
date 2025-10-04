@@ -20,7 +20,9 @@ mod utils;
 
 use shell::Shell;
 
-use crate::utils::{check_git_clean, copy_dir_all, get_git_revision, get_git_tree_hash};
+use crate::utils::{
+    check_git_clean, copy_dir_all, export_git_revision, get_git_revision, get_git_tree_hash,
+};
 
 fn get_base_os() -> Result<String> {
     let os_release_content = fs::read_to_string("/etc/os-release")?;
@@ -132,6 +134,7 @@ pub enum SourceType {
         url: Option<String>,
         path: Option<String>,
         subpath: Option<String>,
+        revision: Option<String>,
     },
 
     #[serde(rename = "srpm")]
@@ -497,25 +500,216 @@ impl Source {
 
         Ok(repo_path)
     }
+
+    fn get_working_path(&self, key: &SourceKey, workspace: &Path, update: bool) -> Result<PathBuf> {
+        match &self.typ {
+            SourceType::Git {
+                revision, subpath, ..
+            } => {
+                if let Some(revision) = revision {
+                    // For specific revisions, export to a revision-specific directory
+                    let source_repo_path = self.get_repo_path(key, workspace, update)?;
+
+                    // Resolve the revision to its full commit hash
+                    let output = Command::new("git")
+                        .args(&["rev-parse", revision])
+                        .current_dir(&source_repo_path)
+                        .output()?;
+
+                    if !output.status.success() {
+                        anyhow::bail!(
+                            "Failed to resolve git revision '{}' for source {}: {}",
+                            revision,
+                            key,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+
+                    let full_revision = String::from_utf8(output.stdout)?.trim().to_string();
+                    let export_key = format!("{}-{}", key.as_ref(), full_revision);
+                    let export_path = workspace.join("sources").join(&export_key);
+
+                    // Only export if the directory doesn't already exist
+                    if !export_path.exists() {
+                        info!("Exporting revision {} for source {}", revision, key);
+                        let subpath_ref =
+                            subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()));
+                        export_git_revision(
+                            &source_repo_path,
+                            revision,
+                            &export_path,
+                            subpath_ref.as_deref(),
+                        )?;
+
+                        // Run spectool -g on the exported sources if there's a spec file
+                        self.run_spectool_on_exported_sources(&export_path)?;
+                    }
+
+                    Ok(export_path)
+                } else {
+                    // For HEAD/current revision, use the repo path directly
+                    self.get_repo_path(key, workspace, update)
+                }
+            }
+            _ => self.get_repo_path(key, workspace, update),
+        }
+    }
+
+    fn run_spectool_on_exported_sources(&self, export_path: &Path) -> Result<()> {
+        // Find spec files in the exported directory
+        let spec_files: Vec<_> = std::fs::read_dir(export_path)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_file() && path.extension()? == "spec" {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if spec_files.is_empty() {
+            debug!("No spec files found in exported directory, skipping spectool");
+            return Ok(());
+        }
+
+        for spec_file in spec_files {
+            info!("Running spectool -g on {}", spec_file.display());
+            let output = Command::new("spectool")
+                .args(&["-g", spec_file.to_str().unwrap()])
+                .current_dir(export_path)
+                .output();
+
+            match output {
+                Ok(output) if output.status.success() => {
+                    info!("Successfully ran spectool -g on {}", spec_file.display());
+                    if !output.stdout.is_empty() {
+                        debug!(
+                            "spectool output: {}",
+                            String::from_utf8_lossy(&output.stdout)
+                        );
+                    }
+                }
+                Ok(output) => {
+                    info!(
+                        "spectool -g completed with warnings for {}: {}",
+                        spec_file.display(),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(e) => {
+                    info!(
+                        "spectool command not available or failed for {}: {}",
+                        spec_file.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Result<SourceHash> {
+    // Check if using a specific revision
+    let using_revision = match &source.typ {
+        SourceType::Git { revision, .. } => revision.is_some(),
+        _ => false,
+    };
+
     let repo_path = source.get_repo_path(key, workspace, true)?;
 
-    if !check_git_clean(&repo_path)? {
-        anyhow::bail!("Git repository for {} has uncommitted changes", key);
+    // Skip git clean check when using a specific revision
+    if !using_revision {
+        if !check_git_clean(&repo_path)? {
+            anyhow::bail!("Git repository for {} has uncommitted changes", key);
+        }
     }
 
-    // Extract subpath from source type if it's a Git source
+    // For specific revisions, we need to use the revision instead of the tree hash
+    let git_hash = match &source.typ {
+        SourceType::Git {
+            revision: Some(revision),
+            subpath,
+            ..
+        } => {
+            info!("Using specified revision '{}' for source {}", revision, key);
+            // For specific revisions, we use the revision as part of the hash
+            // But we still need to resolve it to a full commit hash for consistency
+            let output = Command::new("git")
+                .args(&["rev-parse", revision])
+                .current_dir(&repo_path)
+                .output()?;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to resolve git revision '{}' for source {}: {}",
+                    revision,
+                    key,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+
+            let full_revision = String::from_utf8(output.stdout)?.trim().to_string();
+
+            // If there's a subpath, we need to get the tree hash for that specific path at the revision
+            if let Some(subpath) = subpath {
+                let subpath = subpath.replace("${NAME}", key.as_ref());
+                let output = Command::new("git")
+                    .args(&["rev-parse", &format!("{}:{}", full_revision, subpath)])
+                    .current_dir(&repo_path)
+                    .output()?;
+
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "Failed to get tree hash for subpath '{}' at revision '{}' for source {}: {}",
+                        subpath,
+                        revision,
+                        key,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8(output.stdout)?.trim().to_string()
+            } else {
+                // Use the tree hash of the full revision
+                let output = Command::new("git")
+                    .args(&["rev-parse", &format!("{}^{{tree}}", full_revision)])
+                    .current_dir(&repo_path)
+                    .output()?;
+
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "Failed to get tree hash for revision '{}' for source {}: {}",
+                        revision,
+                        key,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8(output.stdout)?.trim().to_string()
+            }
+        }
+        SourceType::Git { subpath, .. } => {
+            // Original behavior for HEAD/current revision
+            let subpath = subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()));
+            get_git_tree_hash(&repo_path, subpath.as_deref())?
+        }
+        _ => {
+            anyhow::bail!("Non-git sources not supported in calc_source_hash");
+        }
+    };
+
+    // Extract subpath for debug message
     let subpath = match &source.typ {
         SourceType::Git { subpath, .. } => {
             subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()))
         }
         _ => None,
     };
-    let subpath = subpath.as_deref();
 
-    let git_hash = get_git_tree_hash(&repo_path, subpath)?;
     debug!(
         "Processed sources for source: {} (git: {}){}",
         key,
@@ -684,13 +878,18 @@ fn create_build_info_file(
     build_dir: &Path,
 ) -> Result<()> {
     let git_revision = match &source.typ {
-        SourceType::Git { .. } => {
-            let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
-            match get_git_revision(&repo_path) {
-                Ok(revision) => Some(revision),
-                Err(e) => {
-                    debug!("Failed to get git revision: {}", e);
-                    None
+        SourceType::Git { revision, .. } => {
+            // If a specific revision is provided, use that; otherwise get current revision
+            if let Some(rev) = revision {
+                Some(rev.clone())
+            } else {
+                let repo_path = source.get_repo_path(&build_key.source_key, workspace, false)?;
+                match get_git_revision(&repo_path) {
+                    Ok(revision) => Some(revision),
+                    Err(e) => {
+                        debug!("Failed to get git revision: {}", e);
+                        None
+                    }
                 }
             }
         }
@@ -725,7 +924,9 @@ async fn build_source(
 ) -> Result<()> {
     // For remote builds, check Copr state instead of local directories
     if args.backend.is_remote() {
-        let copr_state_file = args.copr_state_file.as_ref()
+        let copr_state_file = args
+            .copr_state_file
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Copr state file is required for remote backend"))?;
 
         // Atomically check build state
@@ -770,7 +971,10 @@ async fn build_source(
         }
     } else {
         // For local builds, check if build directory already exists
-        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
+        let build_dir_final = args
+            .workspace
+            .join("builds")
+            .join(build_key.build_dir_name());
         let build_subdir_final = build_dir_final.join("build");
         if build_subdir_final.exists() {
             info!("Build already exists, skipping");
@@ -778,7 +982,8 @@ async fn build_source(
         }
     }
 
-    let build_dir = args.workspace
+    let build_dir = args
+        .workspace
         .join("builds")
         .join(format!("{}.tmp", build_key.build_dir_name()));
 
@@ -811,7 +1016,8 @@ async fn build_source(
         // Hardlink each dependency's build directory
         for (dep_key, dep_hash) in all_dependencies.iter() {
             let dep_build_key = BuildKey::new(dep_key.clone(), dep_hash.clone());
-            let dep_build_dir = args.workspace
+            let dep_build_dir = args
+                .workspace
                 .join("builds")
                 .join(dep_build_key.build_dir_name())
                 .join("build");
@@ -842,8 +1048,8 @@ async fn build_source(
         info!("Created repository metadata in deps directory");
     }
 
-    // Get source repository path
-    let repo_path = source.get_repo_path(&build_key.source_key, &args.workspace, false)?;
+    // Get source working path (exported revision if specified, or repo path)
+    let repo_path = source.get_working_path(&build_key.source_key, &args.workspace, false)?;
 
     // Extract subpath from source type if it's a Git source
     let subpath = match &source.typ {
@@ -917,9 +1123,13 @@ async fn build_source(
             .with_context(|| format!("Docker build failed for {}", build_key))?;
         }
         BuilderBackend::Copr => {
-            let copr_project = args.copr_project.as_ref()
+            let copr_project = args
+                .copr_project
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Copr project name is required for Copr backend"))?;
-            let copr_state_file = args.copr_state_file.as_ref()
+            let copr_state_file = args
+                .copr_state_file
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Copr state file is required for Copr backend"))?;
 
             // If we reach here, we need to submit a new build (state already checked earlier)
@@ -940,7 +1150,10 @@ async fn build_source(
 
     // For remote builds, we don't need to rename directories since builds happen remotely
     if !args.backend.is_remote() {
-        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
+        let build_dir_final = args
+            .workspace
+            .join("builds")
+            .join(build_key.build_dir_name());
         std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
             format!(
                 "Failed to rename build directory from {} to {}",
@@ -1468,7 +1681,7 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
         // Check for %global patterns
         else if let Some(captures) = global_regex.captures(line) {
             let var_name = captures.get(2).unwrap().as_str();
-            
+
             if let Some(new_value) = defines.get(var_name) {
                 info!(
                     "🔄 Replacing %global {} with new value: {}",
