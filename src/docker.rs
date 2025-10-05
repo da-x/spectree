@@ -29,6 +29,39 @@ RUN dnf install -y bash bzip2 cpio diffutils findutils gawk glibc-minimal-langpa
 # WORKDIR /build/workspace
 "#
         .to_string()),
+        "epel9" => Ok(r#"FROM rockylinux:9
+
+RUN dnf install -y 'dnf-command(config-manager)'
+RUN dnf config-manager --set-enabled crb appstream extras
+
+# Install EPEL repository
+RUN dnf install -y epel-release
+
+# Install build dependencies
+RUN dnf install -y bash bzip2 cpio diffutils findutils gawk glibc-minimal-langpack grep gzip info patch redhat-rpm-config rocky-release rpm-build sed tar unzip util-linux which xz
+"#
+        .to_string()),
+        "epel8" => Ok(r#"FROM rockylinux:8
+
+RUN dnf install -y 'dnf-command(config-manager)'
+RUN dnf config-manager --set-enabled appstream extras
+
+# Install EPEL repository
+RUN dnf install -y epel-release
+
+# Install build dependencies
+RUN dnf install -y bash bzip2 cpio diffutils findutils gawk glibc-minimal-langpack grep gzip info patch redhat-rpm-config rocky-release rpm-build sed tar unzip util-linux which xz
+"#
+        .to_string()),
+        "rocky8" => Ok(r#"FROM rockylinux:8
+
+RUN dnf install -y 'dnf-command(config-manager)'
+RUN dnf config-manager --set-enabled appstream extras
+
+# Install build dependencies
+RUN dnf install -y bash bzip2 cpio diffutils findutils gawk glibc-minimal-langpack grep gzip info patch redhat-rpm-config rocky-release rpm-build sed tar unzip util-linux which xz
+"#
+        .to_string()),
         _ => anyhow::bail!("Unsupported OS: {}", os),
     }
 }

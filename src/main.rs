@@ -40,6 +40,8 @@ fn get_base_os() -> Result<String> {
 
     match (id, version_id) {
         (Some("rocky"), Some(version)) if version.starts_with("10") => Ok("epel10".to_string()),
+        (Some("rocky"), Some(version)) if version.starts_with("9") => Ok("epel9".to_string()),
+        (Some("rocky"), Some(version)) if version.starts_with("8") => Ok("epel8".to_string()),
         (Some(id), Some(version)) => {
             anyhow::bail!("Unsupported OS: ID={}, VERSION_ID={}", id, version)
         }
