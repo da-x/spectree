@@ -10,6 +10,7 @@ pub struct Shell<'a> {
     working_dir: &'a Path,
     docker_image: Option<String>,
     mount_binds: Vec<String>,
+    network_enabled: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -18,6 +19,7 @@ impl<'a> Shell<'a> {
             working_dir,
             docker_image: None,
             mount_binds: Vec::new(),
+            network_enabled: true, // Default to enabled for backward compatibility
         }
     }
 
@@ -34,6 +36,12 @@ impl<'a> Shell<'a> {
         self
     }
 
+    #[allow(unused)]
+    pub fn with_network(mut self, enabled: bool) -> Self {
+        self.network_enabled = enabled;
+        self
+    }
+
     fn build_command(&self, command: &str) -> Command {
         let cmd = match &self.docker_image {
             Some(image) => {
@@ -43,9 +51,16 @@ impl<'a> Shell<'a> {
                 let mut args = vec![
                     "run".to_string(),
                     "--rm".to_string(),
-                    "-v".to_string(),
-                    format!("{}:{}", working_dir_str, working_dir_str),
                 ];
+
+                // Add network configuration
+                if !self.network_enabled {
+                    args.push("--network".to_string());
+                    args.push("none".to_string());
+                }
+
+                args.push("-v".to_string());
+                args.push(format!("{}:{}", working_dir_str, working_dir_str));
 
                 // Add additional mount binds
                 for mount_bind in &self.mount_binds {
@@ -86,9 +101,16 @@ impl<'a> Shell<'a> {
                 let mut args = vec![
                     "run".to_string(),
                     "--rm".to_string(),
-                    "-v".to_string(),
-                    format!("{}:{}", working_dir_str, working_dir_str),
                 ];
+
+                // Add network configuration
+                if !self.network_enabled {
+                    args.push("--network".to_string());
+                    args.push("none".to_string());
+                }
+
+                args.push("-v".to_string());
+                args.push(format!("{}:{}", working_dir_str, working_dir_str));
 
                 // Add additional mount binds
                 for mount_bind in &self.mount_binds {

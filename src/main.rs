@@ -274,6 +274,8 @@ pub struct Source {
     pub dependencies: Vec<SourceKey>,
     #[serde(default)]
     pub params: Vec<String>,
+    #[serde(default)]
+    pub network: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1118,6 +1120,7 @@ async fn build_source(
                 build_dir.clone(),
                 &source.params,
                 args.debug_prepare,
+                source.network,
             )
             .await
             .with_context(|| format!("Docker build failed for {}", build_key))?;
@@ -1318,6 +1321,7 @@ async fn build_under_docker(
     build_dir: PathBuf,
     params: &[String],
     debug_prepare: bool,
+    network_enabled: bool,
 ) -> Result<(), anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -1335,10 +1339,13 @@ async fn build_under_docker(
         ),
     };
 
-    let shell = Shell::new(workspace).with_image(&image).with_mount(
-        &build_dir.to_string_lossy().as_ref().to_owned(),
-        "/workspace",
-    );
+    let shell = Shell::new(workspace)
+        .with_image(&image)
+        .with_mount(
+            &build_dir.to_string_lossy().as_ref().to_owned(),
+            "/workspace",
+        )
+        .with_network(network_enabled);
 
     // Build the params string for rpmbuild
     let params_str = format_params_for_command(params, " ");
@@ -1441,10 +1448,13 @@ RUN dnf install -y {deps}
         info!("Building on image {image}");
     }
 
-    let shell = Shell::new(workspace).with_image(&image).with_mount(
-        &build_dir.to_string_lossy().as_ref().to_owned(),
-        "/workspace",
-    );
+    let shell = Shell::new(workspace)
+        .with_image(&image)
+        .with_mount(
+            &build_dir.to_string_lossy().as_ref().to_owned(),
+            "/workspace",
+        )
+        .with_network(network_enabled);
 
     if debug_prepare {
         info!("🔍 Debug mode: Running rpmbuild -bp (prepare only)");
@@ -1730,6 +1740,12 @@ async fn build_with_copr(
     for chroot in exclude_chroots {
         copr_cmd.push("--exclude-chroot".to_string());
         copr_cmd.push(chroot.clone());
+    }
+
+    // Add network flag if network access is enabled
+    if source.network {
+        copr_cmd.push("--enable-net".to_string());
+        copr_cmd.push("on".to_string());
     }
 
     let copr_command = copr_cmd.join(" ");
