@@ -1015,8 +1015,6 @@ async fn build_source(
             .with_context(|| format!("Failed to create deps directory: {}", deps_dir.display()))?;
         info!("Created deps directory: {}", deps_dir.display());
 
-        let shell = Shell::new(&deps_dir);
-
         // Hardlink each dependency's build directory
         for (dep_key, dep_hash) in all_dependencies.iter() {
             let dep_build_key = BuildKey::new(dep_key.clone(), dep_hash.clone());
@@ -1044,12 +1042,15 @@ async fn build_source(
             debug!("Hardlinked dependency {} to deps directory", dep_key);
         }
 
-        // Run createrepo_c to create repository metadata
-        shell
-            .run_with_output("createrepo_c .")
-            .await
-            .context("Failed to create repository metadata with createrepo_c")?;
-        info!("Created repository metadata in deps directory");
+        // Run createrepo_c to create repository metadata (skip for Docker backend)
+        if args.backend != BuilderBackend::Docker {
+            let shell = Shell::new(&deps_dir);
+            shell
+                .run_with_output("createrepo_c .")
+                .await
+                .context("Failed to create repository metadata with createrepo_c")?;
+            info!("Created repository metadata in deps directory");
+        }
     }
 
     // Get source working path (exported revision if specified, or repo path)
@@ -1398,6 +1399,7 @@ list-missing-deps
             format!(
                 r#"FROM {image}
 COPY --from=deps / /deps
+RUN createrepo_c /deps
 RUN dnf install --repofrompath=deps,file:///deps --setopt=deps.gpgcheck=0 --enablerepo=deps -y {deps}
 RUN rm -rf /deps
 "#
