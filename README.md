@@ -94,8 +94,26 @@ app:
 Build with Mock (default):
 
 ```bash
-spectree packages.yaml /workspace app
+spectree build packages.yaml /workspace app
 ```
+
+## Commands
+
+### Build Command
+The main command for building RPM packages from your specification:
+```bash
+spectree build <spec_file> <workspace> <root_sources...> [options]
+```
+
+### Clean Command
+Utility commands for cleaning up resources:
+
+**Clean Docker Images**: Remove Docker images with hash tags, keeping only `:latest` tagged images:
+```bash
+spectree clean docker
+```
+
+This is useful for cleaning up the multiple tagged images created during builds (e.g., `spectree.ops/epel10:abc123`, `spectree.ops/epel10:def456`) while preserving the base images tagged as `latest`.
 
 ## Build Backends
 
@@ -104,7 +122,7 @@ spectree packages.yaml /workspace app
 Uses Mock to build packages in isolated chroots:
 
 ```bash
-spectree packages.yaml /workspace app --backend mock
+spectree build packages.yaml /workspace app --backend mock
 ```
 
 ### Docker Backend
@@ -112,13 +130,13 @@ spectree packages.yaml /workspace app --backend mock
 Builds packages in Docker containers with automatic dependency resolution:
 
 ```bash
-spectree packages.yaml /workspace app --backend docker --target-os fedora-39
+spectree build packages.yaml /workspace app --backend docker --target-os fedora-39
 ```
 
 **Debug Mode**: For investigating build issues, use the debug flag to stop after source preparation:
 
 ```bash
-spectree packages.yaml /workspace app --backend docker --debug-prepare
+spectree build packages.yaml /workspace app --backend docker --debug-prepare
 ```
 
 
@@ -128,7 +146,7 @@ This runs `rpmbuild -bp` (prepare only), prints the prepared source path, and in
 Submits builds to Fedora Copr for remote building:
 
 ```bash
-spectree packages.yaml /workspace app \
+spectree build packages.yaml /workspace app \
   --backend copr \
   --copr-project myproject \
   --copr-state-file builds.yaml \
@@ -148,7 +166,7 @@ Copr builds include:
 
 Useful for testing dependency resolution without actual builds:
 ```bash
-spectree packages.yaml /workspace app --backend null
+spectree build packages.yaml /workspace app --backend null
 ```
 
 
@@ -223,8 +241,10 @@ Direct-only dependencies (prefixed with `~`) are useful when bootstrapping packa
 
 ## Command Line Options
 
+### Build Command
+
 ```
-spectree [OPTIONS] <SPEC_FILE> <WORKSPACE> <ROOT_SOURCE>
+spectree build [OPTIONS] <SPEC_FILE> <WORKSPACE> <ROOT_SOURCE>
 
 Arguments:
   <SPEC_FILE>    Path to the YAML specification file
@@ -253,8 +273,23 @@ Options:
       --debug-prepare
           Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection
 
+      --output-dir <OUTPUT_DIR>
+          Output directory to copy build results (root sources and their dependencies)
+
   -h, --help
           Print help
+```
+
+### Clean Command
+
+```
+spectree clean <TARGET>
+
+Subcommands:
+  docker    Clean Docker images (remove non-latest tagged images)
+
+Examples:
+  spectree clean docker    # Remove all spectree.ops/* images except those tagged 'latest'
 ```
 
 
