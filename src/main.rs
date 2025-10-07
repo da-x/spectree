@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use nutype::nutype;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{fs, path};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, span, Instrument, Level};
+use tracing::{debug, error, info, span, warn, Instrument, Level};
 
 mod docker;
 mod logging;
@@ -296,6 +296,32 @@ pub struct SpecTree {
 #[command(name = "spectree")]
 #[command(about = "A tool for building dependent RPM packages from a YAML specification")]
 struct Args {
+    #[command(subcommand)]
+    command: Commands,
+
+    #[command(flatten)]
+    logging: logging::LoggingArgs,
+}
+
+#[derive(Subcommand, Clone)]
+enum Commands {
+    /// Build RPM packages from specification
+    Build(BuildArgs),
+    /// Clean up resources
+    Clean {
+        #[command(subcommand)]
+        target: CleanTarget,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum CleanTarget {
+    /// Clean Docker images (remove non-latest tagged images)
+    Docker,
+}
+
+#[derive(Parser, Clone)]
+struct BuildArgs {
     #[arg(help = "Path to the YAML specification file")]
     spec_file: PathBuf,
 
@@ -352,9 +378,6 @@ struct Args {
         help = "Output directory to copy build results (root sources and their dependencies)"
     )]
     output_dir: Option<PathBuf>,
-
-    #[command(flatten)]
-    logging: logging::LoggingArgs,
 }
 
 fn setup_workspace(workspace: &Path) -> Result<()> {
@@ -731,7 +754,7 @@ struct SourceHashes {
 }
 
 fn get_source_hashes(
-    args: &Args,
+    args: &BuildArgs,
     spec_tree: &SpecTree,
     all_sources: &Vec<SourceKey>,
 ) -> Result<SourceHashes> {
@@ -923,7 +946,7 @@ async fn build_source(
     build_key: &BuildKey,
     source: &Source,
     all_dependencies: &HashMap<SourceKey, BuildHash>,
-    args: &Args,
+    args: &BuildArgs,
     copr_state_mutex: &Mutex<()>,
 ) -> Result<()> {
     // For remote builds, check Copr state instead of local directories
@@ -1888,7 +1911,7 @@ async fn build_source_task(
     build_key: BuildKey,
     source: Source,
     all_dependencies: HashMap<SourceKey, BuildHash>,
-    args: Args,
+    args: BuildArgs,
     copr_state_mutex: std::sync::Arc<Mutex<()>>,
     direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
@@ -2152,13 +2175,7 @@ fn copy_build_results_to_output_dir(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-
-    // Initialize logging
-    logging::start(&args.logging)?;
-
+async fn handle_build(args: BuildArgs) -> Result<()> {
     // Always create the mutex (simpler than conditional logic)
     let copr_state_mutex = std::sync::Arc::new(Mutex::new(()));
 
@@ -2431,4 +2448,68 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_clean_docker() -> Result<()> {
+    use crate::shell::Shell;
+    use std::path::Path;
+
+    info!("Cleaning Docker images (removing non-latest tagged images)...");
+
+    let shell = Shell::new(Path::new("."));
+
+    // Get all spectree.ops images
+    let images_output = shell
+        .run_with_output("docker images spectree.ops/\\* --format '{{.Repository}}:{{.Tag}}'")
+        .await?;
+
+    let mut removed_count = 0;
+
+    for line in images_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Skip 'latest' tagged images
+        if line.ends_with(":latest") {
+            info!("Keeping latest image: {}", line);
+            continue;
+        }
+
+        // Remove non-latest images
+        info!("Removing image: {}", line);
+        let remove_result = shell.run_with_output(&format!("docker rmi {}", line)).await;
+
+        match remove_result {
+            Ok(_) => {
+                info!("✅ Removed: {}", line);
+                removed_count += 1;
+            }
+            Err(e) => {
+                warn!("Failed to remove {}: {}", line, e);
+            }
+        }
+    }
+
+    info!(
+        "✅ Cleanup complete. Removed {} Docker images",
+        removed_count
+    );
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // Initialize logging
+    logging::start(&args.logging)?;
+
+    match args.command {
+        Commands::Build(build_args) => handle_build(build_args).await,
+        Commands::Clean { target } => match target {
+            CleanTarget::Docker => handle_clean_docker().await,
+        },
+    }
 }
