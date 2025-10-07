@@ -1394,7 +1394,7 @@ list-missing-deps
 
         let mut hasher = Sha256::new();
         hasher.update(deps.as_bytes());
-        let deps_image = format!("{image}-{:x}", hasher.finalize());
+        let deps_image = format!("{}:{:x}", image, hasher.finalize());
         let dockerfile = if dep_repo {
             format!(
                 r#"FROM {image}
