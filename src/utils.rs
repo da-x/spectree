@@ -1,68 +1,36 @@
-use anyhow::Result;
-use std::{path::Path, process::Command};
+use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::{debug, info};
+use crate::shell::{Shell, ShellEscaped};
 
 pub(crate) fn check_git_clean(repo_path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(&["status", "--porcelain"])
-        .current_dir(repo_path)
-        .output()?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to check git status: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(output.stdout.is_empty())
+    let shell = Shell::new(repo_path);
+    let output = shell.run_with_output_sync("git status --porcelain")?;
+    Ok(output.is_empty())
 }
 
 pub(crate) fn get_git_tree_hash(repo_path: &Path, subpath: Option<&str>) -> Result<String> {
-    let output = match subpath {
-        Some(subpath) => {
-            // Get the tree hash of the specific subdirectory
-            Command::new("git")
-                .args(&["rev-parse", &format!("HEAD:{}", subpath)])
-                .current_dir(repo_path)
-                .output()?
-        }
-        None => {
-            // Get the tree hash of the entire repository
-            Command::new("git")
-                .args(&["rev-parse", "HEAD^{tree}"])
-                .current_dir(repo_path)
-                .output()?
-        }
+    let shell = Shell::new(repo_path);
+    let command = match subpath {
+        Some(subpath) => format!("git rev-parse HEAD:{}", subpath),
+        None => "git rev-parse HEAD^{tree}".to_string(),
     };
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to get git hash{}: {}",
+    let output = shell.run_with_output_sync(&command)
+        .with_context(|| format!(
+            "Failed to get git hash{}",
             subpath
                 .map(|s| format!(" for subpath '{}'", s))
-                .unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+                .unwrap_or_default()
+        ))?;
 
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    Ok(output)
 }
 
 pub(crate) fn get_git_revision(repo_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
-        .current_dir(repo_path)
-        .output()?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to get git revision: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    let shell = Shell::new(repo_path);
+    let output = shell.run_with_output_sync("git rev-parse HEAD")?;
+    Ok(output)
 }
 
 // Helper function to recursively copy directories with hardlinks when possible
@@ -73,12 +41,12 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 
     // First try to hardlink the entire directory tree with cp -al
-    let cp_result = Command::new("cp")
-        .args(&["-al", &src.to_string_lossy(), &dst.to_string_lossy()])
-        .output();
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let shell = Shell::new(&current_dir);
+    let cp_result = shell.run_sync(&format!("cp -al {} {}", src.shell_escaped(), dst.shell_escaped()));
 
     match cp_result {
-        Ok(output) if output.status.success() => {
+        Ok(()) => {
             debug!(
                 "Successfully hardlinked directory {} to {}",
                 src.display(),
@@ -86,14 +54,8 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
             );
             return Ok(());
         }
-        Ok(output) => {
-            debug!(
-                "cp -al failed: {}, falling back to regular copy",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
         Err(e) => {
-            debug!("cp command failed: {}, falling back to regular copy", e);
+            debug!("cp -al failed: {}, falling back to regular copy", e);
         }
     }
 
@@ -138,21 +100,16 @@ pub(crate) fn export_git_revision(
         subpath.map(|s| format!(" (subpath: {})", s)).unwrap_or_default()
     );
 
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to export git revision '{}'{}: {}",
+    let shell = Shell::new(repo_path);
+    let command = args.join(" ");
+    let output = shell.run_with_output_sync(&command)
+        .with_context(|| format!(
+            "Failed to export git revision '{}'{}",
             revision,
             subpath
                 .map(|s| format!(" from subpath '{}'", s))
-                .unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+                .unwrap_or_default()
+        ))?;
 
     // Create parent directory if it doesn't exist
     if let Some(parent) = export_path.parent() {
@@ -162,23 +119,19 @@ pub(crate) fn export_git_revision(
 
     // Use a simpler approach: write archive to temp file then extract
     let temp_archive = export_path.with_extension("tar.tmp");
-    std::fs::write(&temp_archive, &output.stdout)?;
+    std::fs::write(&temp_archive, output.as_bytes())?;
 
     // Extract the tar archive to the export path
-    let tar_result = Command::new("tar")
-        .args(&["-xf", &temp_archive.to_string_lossy(), "-C", &export_path.to_string_lossy()])
-        .output()?;
+    let tar_command = format!("tar -xf {} -C {}", temp_archive.shell_escaped(), export_path.shell_escaped());
+    let tar_result = shell.run_sync(&tar_command);
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_archive);
 
-    if !tar_result.status.success() {
-        anyhow::bail!(
-            "Failed to extract git archive to {}: {}",
-            export_path.display(),
-            String::from_utf8_lossy(&tar_result.stderr)
-        );
-    }
+    tar_result.with_context(|| format!(
+        "Failed to extract git archive to {}",
+        export_path.display()
+    ))?;
 
     debug!("Successfully exported git revision to {}", export_path.display());
     Ok(())

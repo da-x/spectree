@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
 use std::{fs, path};
@@ -18,7 +17,7 @@ mod logging;
 mod shell;
 mod utils;
 
-use shell::Shell;
+use shell::{Shell, ShellEscaped};
 
 use crate::utils::{
     check_git_clean, copy_dir_all, export_git_revision, get_git_revision, get_git_tree_hash,
@@ -409,10 +408,8 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
 
     if repo_path.exists() {
         info!("Updating existing repo for {}", key);
-        let output = Command::new("git")
-            .args(&["fetch", "origin"])
-            .current_dir(&repo_path)
-            .output()
+        let shell = Shell::new(&repo_path);
+        shell.run_sync("git fetch origin")
             .with_context(|| {
                 format!(
                     "Failed to execute git fetch in repo: {}",
@@ -420,37 +417,18 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
                 )
             })?;
 
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to fetch in repo {}: {}",
-                repo_path.display(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        let output = Command::new("git")
-            .args(&["reset", "--hard", "origin/HEAD"])
-            .current_dir(&repo_path)
-            .output()
+        shell.run_sync("git reset --hard origin/HEAD")
             .with_context(|| {
                 format!(
                     "Failed to execute git reset in repo: {}",
                     repo_path.display()
                 )
             })?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to reset in repo {}: {}",
-                repo_path.display(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
     } else {
         info!("Cloning repo for {} from {}", key, url);
-        let output = Command::new("git")
-            .args(&["clone", url, &repo_path.to_string_lossy()])
-            .output()
+        let parent_dir = repo_path.parent().unwrap_or_else(|| Path::new("."));
+        let shell = Shell::new(parent_dir);
+        shell.run_sync(&format!("git clone {} {}", url.shell_escaped(), repo_path.shell_escaped()))
             .with_context(|| {
                 format!(
                     "Failed to execute git clone from {} to {}",
@@ -458,15 +436,6 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
                     repo_path.display()
                 )
             })?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to clone from {} to {}: {}",
-                url,
-                repo_path.display(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
     }
 
     Ok(repo_path)
@@ -538,21 +507,12 @@ impl Source {
                     let source_repo_path = self.get_repo_path(key, workspace, update)?;
 
                     // Resolve the revision to its full commit hash
-                    let output = Command::new("git")
-                        .args(&["rev-parse", revision])
-                        .current_dir(&source_repo_path)
-                        .output()?;
-
-                    if !output.status.success() {
-                        anyhow::bail!(
-                            "Failed to resolve git revision '{}' for source {}: {}",
-                            revision,
-                            key,
-                            String::from_utf8_lossy(&output.stderr)
-                        );
-                    }
-
-                    let full_revision = String::from_utf8(output.stdout)?.trim().to_string();
+                    let shell = Shell::new(&source_repo_path);
+                    let full_revision = shell.run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
+                        .with_context(|| format!(
+                            "Failed to resolve git revision '{}' for source {}",
+                            revision, key
+                        ))?;
                     let export_key = format!("{}-{}", key.as_ref(), full_revision);
                     let export_path = workspace.join("sources").join(&export_key);
 
@@ -603,27 +563,13 @@ impl Source {
 
         for spec_file in spec_files {
             info!("Running spectool -g on {}", spec_file.display());
-            let output = Command::new("spectool")
-                .args(&["-g", spec_file.to_str().unwrap()])
-                .current_dir(export_path)
-                .output();
+            let shell = Shell::new(export_path);
+            let output = shell.run_with_output_sync(&format!("spectool -g {}", spec_file.shell_escaped()));
 
             match output {
-                Ok(output) if output.status.success() => {
-                    info!("Successfully ran spectool -g on {}", spec_file.display());
-                    if !output.stdout.is_empty() {
-                        debug!(
-                            "spectool output: {}",
-                            String::from_utf8_lossy(&output.stdout)
-                        );
-                    }
-                }
                 Ok(output) => {
-                    info!(
-                        "spectool -g completed with warnings for {}: {}",
-                        spec_file.display(),
-                        String::from_utf8_lossy(&output.stderr)
-                    );
+                    info!("Successfully ran spectool -g on {}", spec_file.display());
+                    debug!("spectool output: {}", output);
                 }
                 Err(e) => {
                     info!(
@@ -665,58 +611,28 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
             info!("Using specified revision '{}' for source {}", revision, key);
             // For specific revisions, we use the revision as part of the hash
             // But we still need to resolve it to a full commit hash for consistency
-            let output = Command::new("git")
-                .args(&["rev-parse", revision])
-                .current_dir(&repo_path)
-                .output()?;
-
-            if !output.status.success() {
-                anyhow::bail!(
-                    "Failed to resolve git revision '{}' for source {}: {}",
-                    revision,
-                    key,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-
-            let full_revision = String::from_utf8(output.stdout)?.trim().to_string();
+            let shell = Shell::new(&repo_path);
+            let full_revision = shell.run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
+                .with_context(|| format!(
+                    "Failed to resolve git revision '{}' for source {}",
+                    revision, key
+                ))?;
 
             // If there's a subpath, we need to get the tree hash for that specific path at the revision
             if let Some(subpath) = subpath {
                 let subpath = subpath.replace("${NAME}", key.as_ref());
-                let output = Command::new("git")
-                    .args(&["rev-parse", &format!("{}:{}", full_revision, subpath)])
-                    .current_dir(&repo_path)
-                    .output()?;
-
-                if !output.status.success() {
-                    anyhow::bail!(
-                        "Failed to get tree hash for subpath '{}' at revision '{}' for source {}: {}",
-                        subpath,
-                        revision,
-                        key,
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-
-                String::from_utf8(output.stdout)?.trim().to_string()
+                shell.run_with_output_sync(&format!("git rev-parse {}:{}", full_revision.shell_escaped(), subpath.shell_escaped()))
+                    .with_context(|| format!(
+                        "Failed to get tree hash for subpath '{}' at revision '{}' for source {}",
+                        subpath, revision, key
+                    ))?
             } else {
                 // Use the tree hash of the full revision
-                let output = Command::new("git")
-                    .args(&["rev-parse", &format!("{}^{{tree}}", full_revision)])
-                    .current_dir(&repo_path)
-                    .output()?;
-
-                if !output.status.success() {
-                    anyhow::bail!(
-                        "Failed to get tree hash for revision '{}' for source {}: {}",
-                        revision,
-                        key,
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-
-                String::from_utf8(output.stdout)?.trim().to_string()
+                shell.run_with_output_sync(&format!("git rev-parse {}^{{tree}}", full_revision.shell_escaped()))
+                    .with_context(|| format!(
+                        "Failed to get tree hash for revision '{}' for source {}",
+                        revision, key
+                    ))?
             }
         }
         SourceType::Git { subpath, .. } => {
@@ -1219,8 +1135,8 @@ async fn generate_srpm(
         info!("Detected RHEL Git packaging mode (SOURCES directory found)");
         format!(
             " --define \"_sourcedir {}\" --define \"_specdir {}\"",
-            sources_dir.display(),
-            specs_dir.display()
+            sources_dir.shell_escaped(),
+            specs_dir.shell_escaped()
         )
     } else {
         String::new()
@@ -1231,7 +1147,6 @@ async fn generate_srpm(
 
     let shell = Shell::new(&fedpkg_working_dir);
     let build_srpm_dir = build_dir.join(dirname);
-    let build_srpm_dir_disp = build_srpm_dir.display();
 
     if use_rpmbuild {
         // Use rpmbuild -bs directly (for repacking with baked parameters)
@@ -1264,10 +1179,10 @@ async fn generate_srpm(
 
         shell
             .run_with_output(&format!(
-                "rpmbuild -bs --define \"_topdir {}\" --define \"_srcrpmdir {}\" \"{}\"",
-                fedpkg_working_dir.display(),
-                build_srpm_dir_disp,
-                spec_file.display()
+                "rpmbuild -bs --define \"_topdir {}\" --define \"_srcrpmdir {}\" {}",
+                fedpkg_working_dir.shell_escaped(),
+                build_srpm_dir.shell_escaped(),
+                spec_file.shell_escaped()
             ))
             .await
             .with_context(|| {
@@ -1292,7 +1207,9 @@ async fn generate_srpm(
 
         shell
             .run_with_output(&format!(
-                "fedpkg --release {base_os} srpm --define \"_srcrpmdir {build_srpm_dir_disp}\"{}{}",
+                "fedpkg --release {} srpm --define \"_srcrpmdir {}\"{}{}",
+                base_os.shell_escaped(),
+                build_srpm_dir.shell_escaped(),
                 fedpkg_defines, fedpkg_params
             ))
             .await

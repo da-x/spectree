@@ -1,14 +1,13 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tempfile::TempDir;
 use tracing::{debug, error, info};
 
 mod logging;
 mod shell;
 
-use shell::Shell;
+use shell::{Shell, ShellEscaped};
 
 fn setup_git_repo(temp_dir: &Path, package_name: &str, spec_content: &str) -> Result<String> {
     let repo_path = temp_dir.join(package_name);
@@ -145,21 +144,20 @@ fn main() -> Result<()> {
         workspace_path.display(),
         backend
     );
-    let status = Command::new("./target/debug/spectree")
-        .arg(&yaml_path)
-        .arg("--workspace")
-        .arg(&workspace_path)
-        .arg("combined") // Use hello-extended as root since it depends on hello
-        .arg("--backend")
-        .arg(&backend)
-        .arg("--log-level")
-        .arg("debug")
-        .status()?;
+    let current_dir = std::env::current_dir()?;
+    let shell = Shell::new(&current_dir);
+    let command = format!(
+        "./target/debug/spectree {} --workspace {} combined --backend {} --log-level debug",
+        yaml_path.shell_escaped(),
+        workspace_path.shell_escaped(),
+        backend.shell_escaped()
+    );
+    let status = shell.run_sync(&command);
 
-    if status.success() {
+    if status.is_ok() {
         info!("✅ Test completed successfully!");
     } else {
-        error!("❌ Test failed with exit code: {}", status);
+        error!("❌ Test failed: {:?}", status);
         anyhow::bail!("Test failed");
     }
 

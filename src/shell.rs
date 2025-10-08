@@ -1,10 +1,120 @@
 use anyhow::Result;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, Instrument};
+use std::borrow::Cow;
+
+pub use shell_escape::unix::escape as shell_escape;
+
+/// Trait for types that can be shell-escaped
+pub trait ShellEscaped {
+    /// Returns a shell-escaped version of this value
+    fn shell_escaped(&self) -> Cow<'_, str>;
+}
+
+impl ShellEscaped for str {
+    fn shell_escaped(&self) -> Cow<'_, str> {
+        shell_escape(self.into())
+    }
+}
+
+impl ShellEscaped for String {
+    fn shell_escaped(&self) -> Cow<'_, str> {
+        shell_escape(self.as_str().into())
+    }
+}
+
+impl ShellEscaped for Path {
+    fn shell_escaped(&self) -> Cow<'_, str> {
+        shell_escape(self.to_string_lossy().into())
+    }
+}
+
+impl ShellEscaped for PathBuf {
+    fn shell_escaped(&self) -> Cow<'_, str> {
+        shell_escape(self.to_string_lossy().into())
+    }
+}
+
+impl ShellEscaped for std::path::Display<'_> {
+    fn shell_escaped(&self) -> Cow<'_, str> {
+        shell_escape(self.to_string().into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shell_escape, ShellEscaped};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn test_shell_escape_simple_path() {
+        let path = "/simple/path";
+        let escaped = shell_escape(path.into());
+        assert_eq!(escaped, "/simple/path");
+    }
+
+    #[test]
+    fn test_shell_escape_path_with_spaces() {
+        let path = "/path with spaces/file.txt";
+        let escaped = shell_escape(path.into());
+        assert_eq!(escaped, "'/path with spaces/file.txt'");
+    }
+
+    #[test]
+    fn test_shell_escape_path_with_special_chars() {
+        let path = "/path/with$special&chars";
+        let escaped = shell_escape(path.into());
+        assert_eq!(escaped, "'/path/with$special&chars'");
+    }
+
+    #[test]
+    fn test_shell_escape_path_with_quotes() {
+        let path = "/path/with'quotes";
+        let escaped = shell_escape(path.into());
+        assert_eq!(escaped, "'/path/with'\\''quotes'");
+    }
+
+    // Tests for the ShellEscaped trait
+    #[test]
+    fn test_trait_str() {
+        let s = "/simple/path";
+        assert_eq!(s.shell_escaped(), "/simple/path");
+        
+        let s = "/path with spaces";
+        assert_eq!(s.shell_escaped(), "'/path with spaces'");
+    }
+
+    #[test]
+    fn test_trait_string() {
+        let s = String::from("/simple/path");
+        assert_eq!(s.shell_escaped(), "/simple/path");
+        
+        let s = String::from("/path with spaces");
+        assert_eq!(s.shell_escaped(), "'/path with spaces'");
+    }
+
+    #[test]
+    fn test_trait_path() {
+        let p = Path::new("/simple/path");
+        assert_eq!(p.shell_escaped(), "/simple/path");
+        
+        let p = Path::new("/path with spaces");
+        assert_eq!(p.shell_escaped(), "'/path with spaces'");
+    }
+
+    #[test]
+    fn test_trait_pathbuf() {
+        let p = PathBuf::from("/simple/path");
+        assert_eq!(p.shell_escaped(), "/simple/path");
+        
+        let p = PathBuf::from("/path with spaces");
+        assert_eq!(p.shell_escaped(), "'/path with spaces'");
+    }
+}
 
 pub struct Shell<'a> {
     working_dir: &'a Path,
