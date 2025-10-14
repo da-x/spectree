@@ -139,8 +139,16 @@ spectree build packages.yaml /workspace app --backend docker --target-os fedora-
 spectree build packages.yaml /workspace app --backend docker --debug-prepare
 ```
 
-
 This runs `rpmbuild -bp` (prepare only), prints the prepared source path, and intentionally fails so you can inspect the BUILD directory.
+
+**Custom Repositories**: Add custom YUM repositories to the build environment using `--with-repo`:
+
+```bash
+spectree build packages.yaml /workspace app --backend docker \
+  --with-repo gcc:baseurl=https://download.copr.fedorainfracloud.org/results/alonid/gcc-toolset-15/rhel+epel-10-\$basearch/,gpgcheck=0
+```
+
+This creates a repository configuration file at `/etc/yum.repos.d/gcc.repo` with the specified settings. The format is `<name>:<field1>,<field2>,...` where fields are YUM repository configuration directives.
 
 ### Copr Backend
 Submits builds to Fedora Copr for remote building:
@@ -275,6 +283,10 @@ Options:
 
       --output-dir <OUTPUT_DIR>
           Output directory to copy build results (root sources and their dependencies)
+
+      --with-repo <WITH_REPO>
+          Under the docker build, create repo file in /etc/yum.repos.d/<name>.repo with comma-separated fields 
+          (format: <name>:<field1>,<field2>,...) (can be specified multiple times)
 
   -h, --help
           Print help

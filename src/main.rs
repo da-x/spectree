@@ -332,6 +332,13 @@ struct BuildArgs {
         help = "Output directory to copy build results (root sources and their dependencies)"
     )]
     output_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Under the docker build, create repo file in /etc/yum.repos.d/<name>.repo with comma-separated fields (format: <name>:<field1>,<field2>,...)"
+    )]
+    with_repo: Vec<String>,
 }
 
 fn setup_workspace(workspace: &Path) -> Result<()> {
@@ -929,6 +936,7 @@ async fn build_source(
                 &source.params,
                 args.debug_prepare,
                 source.network,
+                &args.with_repo,
             )
             .await
             .with_context(|| format!("Docker build failed for {}", build_key))?;
@@ -1095,9 +1103,70 @@ async fn generate_srpm(
     Ok(srpm_path.clone())
 }
 
+fn parse_repo_spec(spec: &str) -> Result<(String, Vec<String>)> {
+    let parts: Vec<&str> = spec.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        anyhow::bail!(
+            "Invalid repo spec format: '{}'. Expected format: <name>:<field1>,<field2>,...",
+            spec
+        );
+    }
+
+    let name = parts[0].trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("Repo name cannot be empty in spec: '{}'", spec);
+    }
+
+    let fields: Vec<String> = parts[1]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if fields.is_empty() {
+        anyhow::bail!("At least one field must be specified in repo spec: '{}'", spec);
+    }
+
+    Ok((name, fields))
+}
+
+fn create_repo_dockerfile_commands(repo_specs: &[String]) -> Result<String> {
+    if repo_specs.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut commands = Vec::new();
+
+    for spec in repo_specs {
+        info!("Adding repo spec: {}", spec);
+
+        let (name, fields) = parse_repo_spec(spec)?;
+
+        // Create the repo file content
+        let mut repo_content = format!("[{}]\n", name);
+        for field in &fields {
+            repo_content.push_str(field);
+            repo_content.push('\n');
+        }
+
+        repo_content.push_str("enabled=1\n");
+
+        // Create a RUN command to write the repo file
+        let cmd = format!(
+            "RUN printf '{}' > /etc/yum.repos.d/{}.repo",
+            repo_content.replace('\n', "\\n"),
+            name
+        );
+        warn!("{:?}", cmd);
+        commands.push(cmd);
+    }
+
+    Ok(commands.join("\n"))
+}
+
 async fn build_under_docker(
     workspace: &Path, target_os: Option<&str>, build_dir: PathBuf, params: &[String], debug_prepare: bool,
-    network_enabled: bool,
+    network_enabled: bool, with_repo: &[String],
 ) -> Result<(), anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -1114,6 +1183,29 @@ async fn build_under_docker(
             String::from_utf8_lossy(&output.stderr)
         ),
     };
+
+    // Chain in another docker build for repos before dependencies
+    if !with_repo.is_empty() {
+        let repo_commands = create_repo_dockerfile_commands(with_repo)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(format!("base: {}\n", &image));
+        hasher.update(format!("repos: {}\n", with_repo.join(",")));
+        let repo_image = format!("{}:{:x}", image, hasher.finalize());
+
+        let dockerfile_with_repos = format!("FROM {}\n{}", image, repo_commands);
+
+        debug!("repo dockerfile: {}", dockerfile_with_repos);
+        image = match docker::ensure_image(&repo_image, &dockerfile_with_repos, "--layers=false").await? {
+            Ok(image) => image,
+            Err(output) => anyhow::bail!(
+                "error creating repo image: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        };
+
+        info!("Created image with repositories: {}", image);
+    }
 
     let shell = Shell::new(workspace)
         .with_image(&image)
@@ -1148,6 +1240,7 @@ list-missing-deps
         ))
         .await?;
 
+    // Chain in another docker build for dependencies (replaces `image'`).
     let mut deps: Vec<_> = missing_deps.lines().collect();
     if !deps.is_empty() {
         info!("Found {} dependencies", deps.len());
@@ -1159,8 +1252,10 @@ list-missing-deps
         let deps = deps.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(" ");
 
         let mut hasher = Sha256::new();
+        hasher.update(format!("base: {}\n", &image));
+        hasher.update(format!("deps: "));
         hasher.update(deps.as_bytes());
-        let deps_image = format!("{}:{:x}", image, hasher.finalize());
+        let deps_image = format!("{}:{:x}", image.split(':').next().unwrap_or(&image), hasher.finalize());
         let dockerfile = if dep_repo {
             format!(
                 r#"FROM {image}
@@ -1827,6 +1922,11 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
     // Validate debug_prepare is only used with Docker backend
     if args.debug_prepare && args.backend != BuilderBackend::Docker {
         anyhow::bail!("--debug-prepare can only be used with Docker backend");
+    }
+
+    // Validate with_repo is only used with Docker backend
+    if !args.with_repo.is_empty() && args.backend != BuilderBackend::Docker {
+        anyhow::bail!("--with-repo can only be used with Docker backend");
     }
 
     setup_workspace(&args.workspace)?;
