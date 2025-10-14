@@ -67,9 +67,7 @@ RUN dnf install -y bash bzip2 cpio diffutils findutils gawk glibc-minimal-langpa
 }
 
 pub async fn ensure_image(
-    target: &str,
-    dockerfile_content: &str,
-    args: &str,
+    target: &str, dockerfile_content: &str, args: &str,
 ) -> anyhow::Result<Result<String, Output>> {
     let prefix = "spectree.ops/";
     let image_name = if !target.starts_with(prefix) {
@@ -80,9 +78,7 @@ pub async fn ensure_image(
 
     // Check if image already exists
     let shell = Shell::new(Path::new("."));
-    let check_result = shell
-        .run_with_output(&format!("docker images -q {}", image_name))
-        .await;
+    let check_result = shell.run_with_output(&format!("docker images -q {}", image_name)).await;
 
     match check_result {
         Ok(output) if !output.trim().is_empty() => {
@@ -96,9 +92,7 @@ pub async fn ensure_image(
 
     let build_command = format!("docker build {args} --no-cache -t {} -", image_name);
 
-    let output = shell
-        .run_with_stdin_get_output(&build_command, &dockerfile_content)
-        .await?;
+    let output = shell.run_with_stdin_get_output(&build_command, &dockerfile_content).await?;
 
     if !output.status.success() {
         return Ok(Err(output));

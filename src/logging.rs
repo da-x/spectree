@@ -34,10 +34,7 @@ pub struct LoggingArgs {
     #[arg(help = "Directory for rotated log files", long = "log-dir")]
     pub log_dir: Option<PathBuf>,
 
-    #[arg(
-        help = "Logging level for file debugging (info/debug)",
-        long = "log-dir-level"
-    )]
+    #[arg(help = "Logging level for file debugging (info/debug)", long = "log-dir-level")]
     pub log_dir_level: Option<String>,
 }
 
@@ -48,10 +45,7 @@ pub fn start(args: &LoggingArgs) -> anyhow::Result<()> {
     )?;
 
     if let Some(log_dir) = &args.log_dir {
-        update_logging_dir(
-            &log_dir,
-            from_str(&args.log_dir_level, EnvFilter::new("debug"))?,
-        );
+        update_logging_dir(&log_dir, from_str(&args.log_dir_level, EnvFilter::new("debug"))?);
     }
 
     Ok(())
@@ -86,11 +80,8 @@ fn from_str(s: &Option<String>, def: EnvFilter) -> anyhow::Result<EnvFilter> {
     }
 }
 
-type OptionalJSONLogger = Filtered<
-    Option<fmt::Layer<Registry, JsonFields, Format<Json>, NonBlocking>>,
-    EnvFilter,
-    Registry,
->;
+type OptionalJSONLogger =
+    Filtered<Option<fmt::Layer<Registry, JsonFields, Format<Json>, NonBlocking>>, EnvFilter, Registry>;
 type FileLoggerHandle = reload::Handle<OptionalJSONLogger, Registry>;
 
 lazy_static! {
@@ -109,9 +100,7 @@ fn prog() -> Option<String> {
 }
 
 fn inner_update_logging(
-    target: &PathBuf,
-    env_filter: EnvFilter,
-    reload_state: &mut (Option<PathBuf>, FileLoggerHandle),
+    target: &PathBuf, env_filter: EnvFilter, reload_state: &mut (Option<PathBuf>, FileLoggerHandle),
 ) {
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY) // rotate daily
@@ -179,14 +168,10 @@ fn init_logging(env_filter: EnvFilter, env_filter_2: EnvFilter) -> anyhow::Resul
     }
 
     if std::io::stdout().is_terminal() {
-        tracing::subscriber::set_global_default(
-            Registry::default().with(reloading_layer).with(stdout_layer),
-        )
+        tracing::subscriber::set_global_default(Registry::default().with(reloading_layer).with(stdout_layer))
     } else {
         tracing::subscriber::set_global_default(
-            Registry::default()
-                .with(reloading_layer)
-                .with(stdout_layer_no_terminal),
+            Registry::default().with(reloading_layer).with(stdout_layer_no_terminal),
         )
     }
     .expect("Could not set global default subscriber");

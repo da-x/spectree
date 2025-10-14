@@ -1,7 +1,7 @@
+use crate::shell::{Shell, ShellEscaped};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{debug, info};
-use crate::shell::{Shell, ShellEscaped};
 
 pub(crate) fn check_git_clean(repo_path: &Path) -> Result<bool> {
     let shell = Shell::new(repo_path);
@@ -16,13 +16,12 @@ pub(crate) fn get_git_tree_hash(repo_path: &Path, subpath: Option<&str>) -> Resu
         None => "git rev-parse HEAD^{tree}".to_string(),
     };
 
-    let output = shell.run_with_output_sync(&command)
-        .with_context(|| format!(
+    let output = shell.run_with_output_sync(&command).with_context(|| {
+        format!(
             "Failed to get git hash{}",
-            subpath
-                .map(|s| format!(" for subpath '{}'", s))
-                .unwrap_or_default()
-        ))?;
+            subpath.map(|s| format!(" for subpath '{}'", s)).unwrap_or_default()
+        )
+    })?;
 
     Ok(output)
 }
@@ -74,10 +73,7 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 pub(crate) fn export_git_revision(
-    repo_path: &Path,
-    revision: &str,
-    export_path: &Path,
-    subpath: Option<&str>,
+    repo_path: &Path, revision: &str, export_path: &Path, subpath: Option<&str>,
 ) -> Result<()> {
     // Ensure export directory exists
     if let Some(parent) = export_path.parent() {
@@ -86,7 +82,7 @@ pub(crate) fn export_git_revision(
 
     // Build git archive command
     let mut args = vec!["archive", "--format=tar", revision];
-    
+
     // Add subpath if specified
     if let Some(subpath) = subpath {
         args.push(subpath);
@@ -102,14 +98,13 @@ pub(crate) fn export_git_revision(
 
     let shell = Shell::new(repo_path);
     let command = args.join(" ");
-    let output = shell.run_with_output_sync(&command)
-        .with_context(|| format!(
+    let output = shell.run_with_output_sync(&command).with_context(|| {
+        format!(
             "Failed to export git revision '{}'{}",
             revision,
-            subpath
-                .map(|s| format!(" from subpath '{}'", s))
-                .unwrap_or_default()
-        ))?;
+            subpath.map(|s| format!(" from subpath '{}'", s)).unwrap_or_default()
+        )
+    })?;
 
     // Create parent directory if it doesn't exist
     if let Some(parent) = export_path.parent() {
@@ -122,16 +117,17 @@ pub(crate) fn export_git_revision(
     std::fs::write(&temp_archive, output.as_bytes())?;
 
     // Extract the tar archive to the export path
-    let tar_command = format!("tar -xf {} -C {}", temp_archive.shell_escaped(), export_path.shell_escaped());
+    let tar_command = format!(
+        "tar -xf {} -C {}",
+        temp_archive.shell_escaped(),
+        export_path.shell_escaped()
+    );
     let tar_result = shell.run_sync(&tar_command);
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_archive);
 
-    tar_result.with_context(|| format!(
-        "Failed to extract git archive to {}",
-        export_path.display()
-    ))?;
+    tar_result.with_context(|| format!("Failed to extract git archive to {}", export_path.display()))?;
 
     debug!("Successfully exported git revision to {}", export_path.display());
     Ok(())

@@ -31,10 +31,7 @@ fn setup_git_repo(temp_dir: &Path, package_name: &str, spec_content: &str) -> Re
 
     // Create tarball
     debug!("Creating tarball for {}", package_name);
-    shell.run_sync(&format!(
-        "tar czf {}-1.0.tar.gz {}-1.0",
-        package_name, package_name
-    ))?;
+    shell.run_sync(&format!("tar czf {}-1.0.tar.gz {}-1.0", package_name, package_name))?;
 
     // Add and commit files
     debug!("Adding and committing files for {}", package_name);
@@ -45,11 +42,7 @@ fn setup_git_repo(temp_dir: &Path, package_name: &str, spec_content: &str) -> Re
 }
 
 fn create_test_yaml(
-    temp_dir: &Path,
-    hello_repo: &str,
-    hello_extended_repo: &str,
-    hello_other_extended_repo: &str,
-    combined_repo: &str,
+    temp_dir: &Path, hello_repo: &str, hello_extended_repo: &str, hello_other_extended_repo: &str, combined_repo: &str,
 ) -> Result<String> {
     let yaml_content = format!(
         r#"hello:
@@ -111,21 +104,13 @@ fn main() -> Result<()> {
 
     info!("Setting up hello-extended package git repository...");
     let hello_extended_repo = setup_git_repo(temp_path, "hello-extended", &hello_extended_spec)?;
-    let hello_other_extended_repo = setup_git_repo(
-        temp_path,
-        "hello-other-extended",
-        &hello_other_extended_spec,
-    )?;
+    let hello_other_extended_repo = setup_git_repo(temp_path, "hello-other-extended", &hello_other_extended_spec)?;
     let combined_repo = setup_git_repo(temp_path, "combined", &combined_spec)?;
 
     // Create test YAML
     info!("Creating test YAML specification...");
     let yaml_path = create_test_yaml(
-        temp_path,
-        &hello_repo,
-        &hello_extended_repo,
-        &hello_other_extended_repo,
-        &combined_repo,
+        temp_path, &hello_repo, &hello_extended_repo, &hello_other_extended_repo, &combined_repo,
     )?;
 
     // Create workspace directory

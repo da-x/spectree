@@ -1,11 +1,11 @@
 use anyhow::Result;
+use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, Instrument};
-use std::borrow::Cow;
 
 pub use shell_escape::unix::escape as shell_escape;
 
@@ -83,7 +83,7 @@ mod tests {
     fn test_trait_str() {
         let s = "/simple/path";
         assert_eq!(s.shell_escaped(), "/simple/path");
-        
+
         let s = "/path with spaces";
         assert_eq!(s.shell_escaped(), "'/path with spaces'");
     }
@@ -92,7 +92,7 @@ mod tests {
     fn test_trait_string() {
         let s = String::from("/simple/path");
         assert_eq!(s.shell_escaped(), "/simple/path");
-        
+
         let s = String::from("/path with spaces");
         assert_eq!(s.shell_escaped(), "'/path with spaces'");
     }
@@ -101,7 +101,7 @@ mod tests {
     fn test_trait_path() {
         let p = Path::new("/simple/path");
         assert_eq!(p.shell_escaped(), "/simple/path");
-        
+
         let p = Path::new("/path with spaces");
         assert_eq!(p.shell_escaped(), "'/path with spaces'");
     }
@@ -110,7 +110,7 @@ mod tests {
     fn test_trait_pathbuf() {
         let p = PathBuf::from("/simple/path");
         assert_eq!(p.shell_escaped(), "/simple/path");
-        
+
         let p = PathBuf::from("/path with spaces");
         assert_eq!(p.shell_escaped(), "'/path with spaces'");
     }
@@ -141,8 +141,7 @@ impl<'a> Shell<'a> {
 
     #[allow(unused)]
     pub fn with_mount(mut self, host_path: &str, container_path: &str) -> Self {
-        self.mount_binds
-            .push(format!("{}:{}", host_path, container_path));
+        self.mount_binds.push(format!("{}:{}", host_path, container_path));
         self
     }
 
@@ -158,10 +157,7 @@ impl<'a> Shell<'a> {
                 let working_dir_str = self.working_dir.to_string_lossy();
                 let mut cmd = Command::new("docker");
 
-                let mut args = vec![
-                    "run".to_string(),
-                    "--rm".to_string(),
-                ];
+                let mut args = vec!["run".to_string(), "--rm".to_string()];
 
                 // Add network configuration
                 if !self.network_enabled {
@@ -208,10 +204,7 @@ impl<'a> Shell<'a> {
                 let working_dir_str = self.working_dir.to_string_lossy();
                 let mut cmd = TokioCommand::new("docker");
 
-                let mut args = vec![
-                    "run".to_string(),
-                    "--rm".to_string(),
-                ];
+                let mut args = vec!["run".to_string(), "--rm".to_string()];
 
                 // Add network configuration
                 if !self.network_enabled {
@@ -261,14 +254,8 @@ impl<'a> Shell<'a> {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", command, e))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get stderr"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("Failed to get stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("Failed to get stderr"))?;
 
         let stdout_reader = BufReader::new(stdout);
         let stderr_reader = BufReader::new(stderr);
@@ -295,23 +282,17 @@ impl<'a> Shell<'a> {
         );
 
         // Wait for both tasks to complete and the process to finish
-        let (stdout_result, stderr_result, wait_result) =
-            tokio::join!(stdout_task, stderr_task, child.wait());
+        let (stdout_result, stderr_result, wait_result) = tokio::join!(stdout_task, stderr_task, child.wait());
 
         // Handle any task errors
         stdout_result.map_err(|e| anyhow::anyhow!("Stdout task error: {}", e))?;
         stderr_result.map_err(|e| anyhow::anyhow!("Stderr task error: {}", e))?;
 
         // Check exit status
-        let exit_status =
-            wait_result.map_err(|e| anyhow::anyhow!("Failed to wait for '{}': {}", command, e))?;
+        let exit_status = wait_result.map_err(|e| anyhow::anyhow!("Failed to wait for '{}': {}", command, e))?;
 
         if !exit_status.success() {
-            anyhow::bail!(
-                "Command '{}' failed with exit code {:?}",
-                command,
-                exit_status.code()
-            );
+            anyhow::bail!("Command '{}' failed with exit code {:?}", command, exit_status.code());
         }
 
         Ok(())
@@ -325,11 +306,7 @@ impl<'a> Shell<'a> {
             .map_err(|e| anyhow::anyhow!("Failed to execute '{}': {}", command, e))?;
 
         if !status.success() {
-            anyhow::bail!(
-                "Command '{}' failed with exit code {:?}",
-                command,
-                status.code()
-            );
+            anyhow::bail!("Command '{}' failed with exit code {:?}", command, status.code());
         }
 
         Ok(())
@@ -376,9 +353,7 @@ impl<'a> Shell<'a> {
 
     #[allow(unused)]
     pub async fn run_with_stdin(&self, command: &str, stdin_content: &str) -> Result<()> {
-        let output = self
-            .run_with_stdin_get_output(command, stdin_content)
-            .await?;
+        let output = self.run_with_stdin_get_output(command, stdin_content).await?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -393,11 +368,7 @@ impl<'a> Shell<'a> {
     }
 
     #[allow(unused)]
-    pub async fn run_with_stdin_get_output(
-        &self,
-        command: &str,
-        stdin_content: &str,
-    ) -> Result<std::process::Output> {
+    pub async fn run_with_stdin_get_output(&self, command: &str, stdin_content: &str) -> Result<std::process::Output> {
         let mut child = self
             .build_tokio_command(command)
             .stdin(Stdio::piped())

@@ -19,9 +19,7 @@ mod utils;
 
 use shell::{Shell, ShellEscaped};
 
-use crate::utils::{
-    check_git_clean, copy_dir_all, export_git_revision, get_git_revision, get_git_tree_hash,
-};
+use crate::utils::{check_git_clean, copy_dir_all, export_git_revision, get_git_revision, get_git_tree_hash};
 
 fn get_base_os() -> Result<String> {
     let os_release_content = fs::read_to_string("/etc/os-release")?;
@@ -143,50 +141,17 @@ pub enum SourceType {
 }
 
 #[nutype(derive(
-    Debug,
-    PartialEq,
-    Eq,
-    Clone,
-    Hash,
-    Serialize,
-    Deserialize,
-    Display,
-    From,
-    Into,
-    Borrow,
-    AsRef
+    Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, Display, From, Into, Borrow, AsRef
 ))]
 pub struct SourceKey(String);
 
 #[nutype(derive(
-    Debug,
-    PartialEq,
-    Eq,
-    Clone,
-    Hash,
-    Serialize,
-    Deserialize,
-    Display,
-    From,
-    Into,
-    Borrow,
-    AsRef
+    Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, Display, From, Into, Borrow, AsRef
 ))]
 pub struct SourceHash(String);
 
 #[nutype(derive(
-    Debug,
-    PartialEq,
-    Eq,
-    Clone,
-    Hash,
-    Serialize,
-    Deserialize,
-    Display,
-    From,
-    Into,
-    Borrow,
-    AsRef
+    Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, Display, From, Into, Borrow, AsRef
 ))]
 pub struct BuildHash(String);
 
@@ -198,10 +163,7 @@ pub struct BuildKey {
 
 impl BuildKey {
     pub fn new(source_key: SourceKey, build_hash: BuildHash) -> Self {
-        Self {
-            source_key,
-            build_hash,
-        }
+        Self { source_key, build_hash }
     }
 
     pub fn build_dir_name(&self) -> String {
@@ -243,17 +205,13 @@ impl CoprStateFile {
             serde_yaml::from_str(&content)
                 .with_context(|| format!("Failed to parse Copr state file: {}", path.display()))
         } else {
-            Ok(Self {
-                builds: Default::default(),
-            })
+            Ok(Self { builds: Default::default() })
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content =
-            serde_yaml::to_string(self).context("Failed to serialize Copr state to YAML")?;
-        fs::write(path, content)
-            .with_context(|| format!("Failed to write Copr state file: {}", path.display()))?;
+        let content = serde_yaml::to_string(self).context("Failed to serialize Copr state to YAML")?;
+        fs::write(path, content).with_context(|| format!("Failed to write Copr state file: {}", path.display()))?;
         Ok(())
     }
 
@@ -338,10 +296,7 @@ struct BuildArgs {
     )]
     backend: BuilderBackend,
 
-    #[arg(
-        long,
-        help = "Target OS for Docker backend (e.g., fedora-39, centos-stream-9)"
-    )]
+    #[arg(long, help = "Target OS for Docker backend (e.g., fedora-39, centos-stream-9)")]
     target_os: Option<String>,
 
     #[arg(long, help = "Copr project name (required for Copr backend)")]
@@ -380,12 +335,8 @@ struct BuildArgs {
 }
 
 fn setup_workspace(workspace: &Path) -> Result<()> {
-    fs::create_dir_all(&workspace).with_context(|| {
-        format!(
-            "Failed to create workspace directory: {}",
-            workspace.display()
-        )
-    })?;
+    fs::create_dir_all(&workspace)
+        .with_context(|| format!("Failed to create workspace directory: {}", workspace.display()))?;
     fs::create_dir_all(workspace.join("sources")).with_context(|| {
         format!(
             "Failed to create sources directory: {}",
@@ -409,42 +360,31 @@ fn clone_or_update_repo(url: &str, workspace: &Path, key: &str) -> Result<PathBu
     if repo_path.exists() {
         info!("Updating existing repo for {}", key);
         let shell = Shell::new(&repo_path);
-        shell.run_sync("git fetch origin")
-            .with_context(|| {
-                format!(
-                    "Failed to execute git fetch in repo: {}",
-                    repo_path.display()
-                )
-            })?;
+        shell
+            .run_sync("git fetch origin")
+            .with_context(|| format!("Failed to execute git fetch in repo: {}", repo_path.display()))?;
 
-        shell.run_sync("git reset --hard origin/HEAD")
-            .with_context(|| {
-                format!(
-                    "Failed to execute git reset in repo: {}",
-                    repo_path.display()
-                )
-            })?;
+        shell
+            .run_sync("git reset --hard origin/HEAD")
+            .with_context(|| format!("Failed to execute git reset in repo: {}", repo_path.display()))?;
     } else {
         info!("Cloning repo for {} from {}", key, url);
         let parent_dir = repo_path.parent().unwrap_or_else(|| Path::new("."));
         let shell = Shell::new(parent_dir);
-        shell.run_sync(&format!("git clone {} {}", url.shell_escaped(), repo_path.shell_escaped()))
-            .with_context(|| {
-                format!(
-                    "Failed to execute git clone from {} to {}",
-                    url,
-                    repo_path.display()
-                )
-            })?;
+        shell
+            .run_sync(&format!(
+                "git clone {} {}",
+                url.shell_escaped(),
+                repo_path.shell_escaped()
+            ))
+            .with_context(|| format!("Failed to execute git clone from {} to {}", url, repo_path.display()))?;
     }
 
     Ok(repo_path)
 }
 
 fn calculate_build_hash(
-    key: &SourceKey,
-    source: &Source,
-    source_content_hash: &SourceHash,
+    key: &SourceKey, source: &Source, source_content_hash: &SourceHash,
     dependency_hashes: &HashMap<SourceKey, BuildHash>,
 ) -> BuildHash {
     let mut hasher = Sha256::new();
@@ -472,8 +412,7 @@ impl Source {
             SourceType::Git { url, path, .. } => {
                 if let Some(path) = path {
                     let path = path.replace("${NAME}", key.as_ref());
-                    path::absolute(&path)
-                        .with_context(|| format!("Failed to get absolute path for: {}", path))?
+                    path::absolute(&path).with_context(|| format!("Failed to get absolute path for: {}", path))?
                 } else if let Some(url) = url {
                     let url = url.replace("${NAME}", key.as_ref());
                     if url.starts_with("file://") {
@@ -499,34 +438,24 @@ impl Source {
 
     fn get_working_path(&self, key: &SourceKey, workspace: &Path, update: bool) -> Result<PathBuf> {
         match &self.typ {
-            SourceType::Git {
-                revision, subpath, ..
-            } => {
+            SourceType::Git { revision, subpath, .. } => {
                 if let Some(revision) = revision {
                     // For specific revisions, export to a revision-specific directory
                     let source_repo_path = self.get_repo_path(key, workspace, update)?;
 
                     // Resolve the revision to its full commit hash
                     let shell = Shell::new(&source_repo_path);
-                    let full_revision = shell.run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
-                        .with_context(|| format!(
-                            "Failed to resolve git revision '{}' for source {}",
-                            revision, key
-                        ))?;
+                    let full_revision = shell
+                        .run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
+                        .with_context(|| format!("Failed to resolve git revision '{}' for source {}", revision, key))?;
                     let export_key = format!("{}-{}", key.as_ref(), full_revision);
                     let export_path = workspace.join("sources").join(&export_key);
 
                     // Only export if the directory doesn't already exist
                     if !export_path.exists() {
                         info!("Exporting revision {} for source {}", revision, key);
-                        let subpath_ref =
-                            subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()));
-                        export_git_revision(
-                            &source_repo_path,
-                            revision,
-                            &export_path,
-                            subpath_ref.as_deref(),
-                        )?;
+                        let subpath_ref = subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()));
+                        export_git_revision(&source_repo_path, revision, &export_path, subpath_ref.as_deref())?;
 
                         // Run spectool -g on the exported sources if there's a spec file
                         self.run_spectool_on_exported_sources(&export_path)?;
@@ -603,36 +532,37 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
 
     // For specific revisions, we need to use the revision instead of the tree hash
     let git_hash = match &source.typ {
-        SourceType::Git {
-            revision: Some(revision),
-            subpath,
-            ..
-        } => {
+        SourceType::Git { revision: Some(revision), subpath, .. } => {
             info!("Using specified revision '{}' for source {}", revision, key);
             // For specific revisions, we use the revision as part of the hash
             // But we still need to resolve it to a full commit hash for consistency
             let shell = Shell::new(&repo_path);
-            let full_revision = shell.run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
-                .with_context(|| format!(
-                    "Failed to resolve git revision '{}' for source {}",
-                    revision, key
-                ))?;
+            let full_revision = shell
+                .run_with_output_sync(&format!("git rev-parse {}", revision.shell_escaped()))
+                .with_context(|| format!("Failed to resolve git revision '{}' for source {}", revision, key))?;
 
             // If there's a subpath, we need to get the tree hash for that specific path at the revision
             if let Some(subpath) = subpath {
                 let subpath = subpath.replace("${NAME}", key.as_ref());
-                shell.run_with_output_sync(&format!("git rev-parse {}:{}", full_revision.shell_escaped(), subpath.shell_escaped()))
-                    .with_context(|| format!(
-                        "Failed to get tree hash for subpath '{}' at revision '{}' for source {}",
-                        subpath, revision, key
-                    ))?
+                shell
+                    .run_with_output_sync(&format!(
+                        "git rev-parse {}:{}",
+                        full_revision.shell_escaped(),
+                        subpath.shell_escaped()
+                    ))
+                    .with_context(|| {
+                        format!(
+                            "Failed to get tree hash for subpath '{}' at revision '{}' for source {}",
+                            subpath, revision, key
+                        )
+                    })?
             } else {
                 // Use the tree hash of the full revision
-                shell.run_with_output_sync(&format!("git rev-parse {}^{{tree}}", full_revision.shell_escaped()))
-                    .with_context(|| format!(
-                        "Failed to get tree hash for revision '{}' for source {}",
-                        revision, key
-                    ))?
+                shell
+                    .run_with_output_sync(&format!("git rev-parse {}^{{tree}}", full_revision.shell_escaped()))
+                    .with_context(|| {
+                        format!("Failed to get tree hash for revision '{}' for source {}", revision, key)
+                    })?
             }
         }
         SourceType::Git { subpath, .. } => {
@@ -647,9 +577,7 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
 
     // Extract subpath for debug message
     let subpath = match &source.typ {
-        SourceType::Git { subpath, .. } => {
-            subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref()))
-        }
+        SourceType::Git { subpath, .. } => subpath.as_ref().map(|s| s.replace("${NAME}", key.as_ref())),
         _ => None,
     };
 
@@ -657,9 +585,7 @@ fn calc_source_hash(key: &SourceKey, source: &Source, workspace: &Path) -> Resul
         "Processed sources for source: {} (git: {}){}",
         key,
         git_hash,
-        subpath
-            .map(|s| format!(" subpath: {}", s))
-            .unwrap_or_default()
+        subpath.map(|s| format!(" subpath: {}", s)).unwrap_or_default()
     );
 
     Ok(SourceHash::new(git_hash))
@@ -669,11 +595,7 @@ struct SourceHashes {
     hashes: HashMap<SourceKey, SourceHash>,
 }
 
-fn get_source_hashes(
-    args: &BuildArgs,
-    spec_tree: &SpecTree,
-    all_sources: &Vec<SourceKey>,
-) -> Result<SourceHashes> {
+fn get_source_hashes(args: &BuildArgs, spec_tree: &SpecTree, all_sources: &Vec<SourceKey>) -> Result<SourceHashes> {
     let mut hashes = HashMap::new();
     for key in all_sources {
         let source = spec_tree.sources.get(key).unwrap();
@@ -691,40 +613,25 @@ fn get_source_hashes(
     Ok(SourceHashes { hashes })
 }
 
-fn find_all_dependency_pairs(
-    sources: &[SourceKey],
-    spec_tree: &SpecTree,
-) -> Result<Vec<(SourceKey, SourceKey)>> {
+fn find_all_dependency_pairs(sources: &[SourceKey], spec_tree: &SpecTree) -> Result<Vec<(SourceKey, SourceKey)>> {
     let mut pairs = Vec::new();
     let mut visited = HashSet::new();
     let mut recursion_stack = HashSet::new();
 
     for source_key in sources {
-        find_dependency_pairs_recursive(
-            source_key,
-            spec_tree,
-            &mut pairs,
-            &mut visited,
-            &mut recursion_stack,
-        )?;
+        find_dependency_pairs_recursive(source_key, spec_tree, &mut pairs, &mut visited, &mut recursion_stack)?;
     }
 
     Ok(pairs)
 }
 
 fn find_dependency_pairs_recursive(
-    source_key: &SourceKey,
-    spec_tree: &SpecTree,
-    pairs: &mut Vec<(SourceKey, SourceKey)>,
-    visited: &mut HashSet<SourceKey>,
-    recursion_stack: &mut HashSet<SourceKey>,
+    source_key: &SourceKey, spec_tree: &SpecTree, pairs: &mut Vec<(SourceKey, SourceKey)>,
+    visited: &mut HashSet<SourceKey>, recursion_stack: &mut HashSet<SourceKey>,
 ) -> Result<()> {
     // Check for cycles - if this source is already in the recursion stack
     if recursion_stack.contains(source_key) {
-        anyhow::bail!(
-            "Circular dependency detected involving source: {}",
-            source_key
-        );
+        anyhow::bail!("Circular dependency detected involving source: {}", source_key);
     }
 
     // If we've already processed this source completely, skip it
@@ -751,13 +658,7 @@ fn find_dependency_pairs_recursive(
         pairs.push((source_key.clone(), actual_dep_key.clone()));
 
         // Recursively process the dependency
-        find_dependency_pairs_recursive(
-            &actual_dep_key,
-            spec_tree,
-            pairs,
-            visited,
-            recursion_stack,
-        )?;
+        find_dependency_pairs_recursive(&actual_dep_key, spec_tree, pairs, visited, recursion_stack)?;
     }
 
     // Remove from recursion stack and mark as visited
@@ -814,12 +715,7 @@ fn format_params_for_command(params: &[String], prefix: &str) -> String {
     }
 }
 
-fn create_build_info_file(
-    build_key: &BuildKey,
-    source: &Source,
-    workspace: &Path,
-    build_dir: &Path,
-) -> Result<()> {
+fn create_build_info_file(build_key: &BuildKey, source: &Source, workspace: &Path, build_dir: &Path) -> Result<()> {
     let git_revision = match &source.typ {
         SourceType::Git { revision, .. } => {
             // If a specific revision is provided, use that; otherwise get current revision
@@ -839,30 +735,20 @@ fn create_build_info_file(
         _ => None,
     };
 
-    let build_info = BuildInfo {
-        source: source.clone(),
-        git_revision,
-    };
+    let build_info = BuildInfo { source: source.clone(), git_revision };
 
     let build_info_path = build_dir.join("build_info.yaml");
-    let build_info_content = serde_yaml::to_string(&build_info)
-        .with_context(|| "Failed to serialize build info to YAML")?;
-    fs::write(&build_info_path, build_info_content).with_context(|| {
-        format!(
-            "Failed to write build info file: {}",
-            build_info_path.display()
-        )
-    })?;
+    let build_info_content =
+        serde_yaml::to_string(&build_info).with_context(|| "Failed to serialize build info to YAML")?;
+    fs::write(&build_info_path, build_info_content)
+        .with_context(|| format!("Failed to write build info file: {}", build_info_path.display()))?;
     debug!("Created build info file: {}", build_info_path.display());
 
     Ok(())
 }
 
 async fn build_source(
-    build_key: &BuildKey,
-    source: &Source,
-    all_dependencies: &HashMap<SourceKey, BuildHash>,
-    args: &BuildArgs,
+    build_key: &BuildKey, source: &Source, all_dependencies: &HashMap<SourceKey, BuildHash>, args: &BuildArgs,
     copr_state_mutex: &Mutex<()>,
 ) -> Result<()> {
     // For remote builds, check Copr state instead of local directories
@@ -901,23 +787,14 @@ async fn build_source(
                         existing_build.build_id, build_key
                     );
                     // Wait for existing build (no SRPM generation needed)
-                    wait_for_copr_build(
-                        existing_build.build_id,
-                        build_key,
-                        copr_state_file,
-                        copr_state_mutex,
-                    )
-                    .await?;
+                    wait_for_copr_build(existing_build.build_id, build_key, copr_state_file, copr_state_mutex).await?;
                     return Ok(());
                 }
             }
         }
     } else {
         // For local builds, check if build directory already exists
-        let build_dir_final = args
-            .workspace
-            .join("builds")
-            .join(build_key.build_dir_name());
+        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
         let build_subdir_final = build_dir_final.join("build");
         if build_subdir_final.exists() {
             info!("Build already exists, skipping");
@@ -936,12 +813,8 @@ async fn build_source(
     let build_subdir = build_dir.join("build");
 
     // Create build subdirectory
-    fs::create_dir_all(&build_subdir).with_context(|| {
-        format!(
-            "Failed to create build subdirectory: {}",
-            build_subdir.display()
-        )
-    })?;
+    fs::create_dir_all(&build_subdir)
+        .with_context(|| format!("Failed to create build subdirectory: {}", build_subdir.display()))?;
     debug!("Created build subdirectory: {}", build_subdir.display());
 
     // Create build information file
@@ -957,17 +830,10 @@ async fn build_source(
         // Hardlink each dependency's build directory
         for (dep_key, dep_hash) in all_dependencies.iter() {
             let dep_build_key = BuildKey::new(dep_key.clone(), dep_hash.clone());
-            let dep_build_dir = args
-                .workspace
-                .join("builds")
-                .join(dep_build_key.build_dir_name())
-                .join("build");
+            let dep_build_dir = args.workspace.join("builds").join(dep_build_key.build_dir_name()).join("build");
 
             if !dep_build_dir.exists() {
-                anyhow::bail!(
-                    "Dependency build directory does not exist: {}",
-                    dep_build_dir.display()
-                );
+                anyhow::bail!("Dependency build directory does not exist: {}", dep_build_dir.display());
             }
 
             let target_dir = deps_dir.join(dep_build_key.build_dir_name());
@@ -997,9 +863,9 @@ async fn build_source(
 
     // Extract subpath from source type if it's a Git source
     let subpath = match &source.typ {
-        SourceType::Git { subpath, .. } => subpath
-            .as_ref()
-            .map(|s| s.replace("${NAME}", build_key.source_key.as_ref())),
+        SourceType::Git { subpath, .. } => {
+            subpath.as_ref().map(|s| s.replace("${NAME}", build_key.source_key.as_ref()))
+        }
         _ => None,
     };
     let subpath = subpath.as_deref();
@@ -1095,10 +961,7 @@ async fn build_source(
 
     // For remote builds, we don't need to rename directories since builds happen remotely
     if !args.backend.is_remote() {
-        let build_dir_final = args
-            .workspace
-            .join("builds")
-            .join(build_key.build_dir_name());
+        let build_dir_final = args.workspace.join("builds").join(build_key.build_dir_name());
         std::fs::rename(&build_dir, &build_dir_final).with_context(|| {
             format!(
                 "Failed to rename build directory from {} to {}",
@@ -1112,14 +975,8 @@ async fn build_source(
 }
 
 async fn generate_srpm(
-    build_key: &BuildKey,
-    source: &Source,
-    target_os: Option<&str>,
-    build_dir: &PathBuf,
-    subpath: Option<&str>,
-    dirname: &str,
-    fedpkg_working_dir: PathBuf,
-    use_rpmbuild: bool,
+    build_key: &BuildKey, source: &Source, target_os: Option<&str>, build_dir: &PathBuf, subpath: Option<&str>,
+    dirname: &str, fedpkg_working_dir: PathBuf, use_rpmbuild: bool,
 ) -> Result<PathBuf, anyhow::Error> {
     let base_os = match target_os {
         Some(os) => os.to_string(),
@@ -1185,24 +1042,13 @@ async fn generate_srpm(
                 spec_file.shell_escaped()
             ))
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to generate SRPM with rpmbuild for {}",
-                    build_key.source_key
-                )
-            })?;
+            .with_context(|| format!("Failed to generate SRPM with rpmbuild for {}", build_key.source_key))?;
     } else {
         // Use fedpkg srpm (original behavior)
         info!(
             "Generating source RPM using fedpkg{}{}",
-            subpath
-                .map(|s| format!(" from subpath '{}'", s))
-                .unwrap_or_default(),
-            if is_rhel_packaging {
-                " (RHEL mode)"
-            } else {
-                ""
-            }
+            subpath.map(|s| format!(" from subpath '{}'", s)).unwrap_or_default(),
+            if is_rhel_packaging { " (RHEL mode)" } else { "" }
         );
 
         shell
@@ -1210,25 +1056,16 @@ async fn generate_srpm(
                 "fedpkg --release {} srpm --define \"_srcrpmdir {}\"{}{}",
                 base_os.shell_escaped(),
                 build_srpm_dir.shell_escaped(),
-                fedpkg_defines, fedpkg_params
+                fedpkg_defines,
+                fedpkg_params
             ))
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to generate SRPM with fedpkg for {}",
-                    build_key.source_key
-                )
-            })?;
+            .with_context(|| format!("Failed to generate SRPM with fedpkg for {}", build_key.source_key))?;
     }
 
     // Find the generated SRPM file
     let srpm_files: Vec<_> = std::fs::read_dir(&build_srpm_dir)
-        .with_context(|| {
-            format!(
-                "Failed to read SRPM directory: {}",
-                build_srpm_dir.display()
-            )
-        })?
+        .with_context(|| format!("Failed to read SRPM directory: {}", build_srpm_dir.display()))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -1259,11 +1096,7 @@ async fn generate_srpm(
 }
 
 async fn build_under_docker(
-    workspace: &Path,
-    target_os: Option<&str>,
-    build_dir: PathBuf,
-    params: &[String],
-    debug_prepare: bool,
+    workspace: &Path, target_os: Option<&str>, build_dir: PathBuf, params: &[String], debug_prepare: bool,
     network_enabled: bool,
 ) -> Result<(), anyhow::Error> {
     let base_os = match target_os {
@@ -1284,10 +1117,7 @@ async fn build_under_docker(
 
     let shell = Shell::new(workspace)
         .with_image(&image)
-        .with_mount(
-            &build_dir.to_string_lossy().as_ref().to_owned(),
-            "/workspace",
-        )
+        .with_mount(&build_dir.to_string_lossy().as_ref().to_owned(), "/workspace")
         .with_network(network_enabled);
 
     // Build the params string for rpmbuild
@@ -1326,11 +1156,7 @@ list-missing-deps
         let dep_repo = build_dir.join("deps").exists();
 
         deps.sort();
-        let deps = deps
-            .iter()
-            .map(|x| format!("{:?}", x))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let deps = deps.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(" ");
 
         let mut hasher = Sha256::new();
         hasher.update(deps.as_bytes());
@@ -1356,10 +1182,7 @@ RUN dnf install -y {deps}
             &deps_image,
             &dockerfile,
             &if dep_repo {
-                format!(
-                    "--layers=false --build-context deps={}/deps",
-                    build_dir.display()
-                )
+                format!("--layers=false --build-context deps={}/deps", build_dir.display())
             } else {
                 format!("--layers=false")
             },
@@ -1372,12 +1195,8 @@ RUN dnf install -y {deps}
                 let mut found = false;
                 for line in stderr.lines() {
                     if let Some(package_start) = line.find("Error: Unable to find a match: ") {
-                        let package =
-                            &line[package_start + "Error: Unable to find a match: ".len()..];
-                        error!(
-                            "Error: Unable to find a match: {}",
-                            package.replace(" \\t", " ")
-                        );
+                        let package = &line[package_start + "Error: Unable to find a match: ".len()..];
+                        error!("Error: Unable to find a match: {}", package.replace(" \\t", " "));
                         found = true;
                         break;
                     }
@@ -1394,10 +1213,7 @@ RUN dnf install -y {deps}
 
     let shell = Shell::new(workspace)
         .with_image(&image)
-        .with_mount(
-            &build_dir.to_string_lossy().as_ref().to_owned(),
-            "/workspace",
-        )
+        .with_mount(&build_dir.to_string_lossy().as_ref().to_owned(), "/workspace")
         .with_network(network_enabled);
 
     if debug_prepare {
@@ -1414,17 +1230,12 @@ rpmbuild -bp -D "_topdir /workspace/build"{} /workspace/build/SPECS/*.spec
 
         // Print the prepared source path
         let build_sources_path = build_dir.join("build/BUILD");
-        info!(
-            "📁 Prepared sources available at: {}",
-            build_sources_path.display()
-        );
+        info!("📁 Prepared sources available at: {}", build_sources_path.display());
         info!("🔍 You can inspect the prepared sources by examining the BUILD directory");
         info!("💡 The sources are left in the workspace for debugging purposes");
 
         // Intentionally fail the build as requested
-        anyhow::bail!(
-            "Build intentionally stopped after prepare phase for debugging (--debug-prepare mode)"
-        );
+        anyhow::bail!("Build intentionally stopped after prepare phase for debugging (--debug-prepare mode)");
     } else {
         shell
             .run_logged(&format!(
@@ -1440,31 +1251,19 @@ rpmbuild -ba -D "_topdir /workspace/build"{} /workspace/build/SPECS/*.spec
 }
 
 async fn repack_srpm_with_params(
-    build_key: &BuildKey,
-    source: &Source,
-    srpm_path: &PathBuf,
-    build_dir: &PathBuf,
-    target_os: Option<&str>,
+    build_key: &BuildKey, source: &Source, srpm_path: &PathBuf, build_dir: &PathBuf, target_os: Option<&str>,
 ) -> Result<PathBuf> {
     let repack_dir = build_dir.join("repack");
 
     // Remove existing repack directory if it exists
     if repack_dir.exists() {
-        fs::remove_dir_all(&repack_dir).with_context(|| {
-            format!(
-                "Failed to remove existing repack directory: {}",
-                repack_dir.display()
-            )
-        })?;
+        fs::remove_dir_all(&repack_dir)
+            .with_context(|| format!("Failed to remove existing repack directory: {}", repack_dir.display()))?;
     }
 
     // Create repack directory
-    fs::create_dir_all(&repack_dir).with_context(|| {
-        format!(
-            "Failed to create repack directory: {}",
-            repack_dir.display()
-        )
-    })?;
+    fs::create_dir_all(&repack_dir)
+        .with_context(|| format!("Failed to create repack directory: {}", repack_dir.display()))?;
 
     info!("📦 Extracting SRPM to repack directory");
 
@@ -1499,28 +1298,21 @@ async fn repack_srpm_with_params(
     }
 
     if spec_files.len() > 1 {
-        anyhow::bail!(
-            "Multiple spec files found in extracted SRPM: {:?}",
-            spec_files
-        );
+        anyhow::bail!("Multiple spec files found in extracted SRPM: {:?}", spec_files);
     }
 
     let spec_file = &spec_files[0];
     info!("📝 Editing spec file: {}", spec_file.display());
 
     // Read and modify spec file
-    let spec_content = fs::read_to_string(spec_file)
-        .with_context(|| format!("Failed to read spec file: {}", spec_file.display()))?;
+    let spec_content =
+        fs::read_to_string(spec_file).with_context(|| format!("Failed to read spec file: {}", spec_file.display()))?;
 
     let modified_spec_content = modify_spec_for_params(&spec_content, &source.params)?;
 
     // Write modified spec file
-    fs::write(spec_file, modified_spec_content).with_context(|| {
-        format!(
-            "Failed to write modified spec file: {}",
-            spec_file.display()
-        )
-    })?;
+    fs::write(spec_file, modified_spec_content)
+        .with_context(|| format!("Failed to write modified spec file: {}", spec_file.display()))?;
 
     info!("🔧 Repacking SRPM with modified spec");
 
@@ -1538,12 +1330,8 @@ async fn repack_srpm_with_params(
     .await?;
 
     // Clean up repack directory
-    fs::remove_dir_all(&repack_dir).with_context(|| {
-        format!(
-            "Failed to remove repack directory: {}",
-            repack_dir.display()
-        )
-    })?;
+    fs::remove_dir_all(&repack_dir)
+        .with_context(|| format!("Failed to remove repack directory: {}", repack_dir.display()))?;
 
     info!("✅ Successfully repacked SRPM with parameters");
     Ok(repacked_srpm_path)
@@ -1585,12 +1373,11 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
     }
 
     // Compile regex patterns for bcond directives and %global definitions
-    let bcond_with_regex = Regex::new(r"^(%bcond_with)[\t ]+([^\t ]+)[\t ]*(.*)")
-        .context("Failed to compile bcond_with regex")?;
-    let bcond_without_regex = Regex::new(r"^(%bcond_without)[\t ]+([^\t ]+)[\t ]*(.*)")
-        .context("Failed to compile bcond_without regex")?;
-    let global_regex = Regex::new(r"^(%global)[\t ]+([^\t ]+)[\t ]+(.*)")
-        .context("Failed to compile global regex")?;
+    let bcond_with_regex =
+        Regex::new(r"^(%bcond_with)[\t ]+([^\t ]+)[\t ]*(.*)").context("Failed to compile bcond_with regex")?;
+    let bcond_without_regex =
+        Regex::new(r"^(%bcond_without)[\t ]+([^\t ]+)[\t ]*(.*)").context("Failed to compile bcond_without regex")?;
+    let global_regex = Regex::new(r"^(%global)[\t ]+([^\t ]+)[\t ]+(.*)").context("Failed to compile global regex")?;
 
     // Process each line
     for line in lines {
@@ -1602,10 +1389,7 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
             let trailing = captures.get(3).map(|m| m.as_str()).unwrap_or("");
 
             if with_features.contains(feature) {
-                info!(
-                    "🔄 Changing %bcond_with {} to %bcond_without {}",
-                    feature, feature
-                );
+                info!("🔄 Changing %bcond_with {} to %bcond_without {}", feature, feature);
                 // Reconstruct the line with %bcond_without
                 if trailing.is_empty() {
                     modified_line = format!("%bcond_without {}", feature);
@@ -1620,10 +1404,7 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
             let trailing = captures.get(3).map(|m| m.as_str()).unwrap_or("");
 
             if without_features.contains(feature) {
-                info!(
-                    "🔄 Changing %bcond_without {} to %bcond_with {}",
-                    feature, feature
-                );
+                info!("🔄 Changing %bcond_without {} to %bcond_with {}", feature, feature);
                 // Reconstruct the line with %bcond_with
                 if trailing.is_empty() {
                     modified_line = format!("%bcond_with {}", feature);
@@ -1637,10 +1418,7 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
             let var_name = captures.get(2).unwrap().as_str();
 
             if let Some(new_value) = defines.get(var_name) {
-                info!(
-                    "🔄 Replacing %global {} with new value: {}",
-                    var_name, new_value
-                );
+                info!("🔄 Replacing %global {} with new value: {}", var_name, new_value);
                 modified_line = format!("%global {} {}", var_name, new_value);
             }
         }
@@ -1652,15 +1430,8 @@ fn modify_spec_for_params(spec_content: &str, params: &[String]) -> Result<Strin
 }
 
 async fn build_with_copr(
-    build_key: &BuildKey,
-    source: &Source,
-    srpm_path: &PathBuf,
-    copr_project: &str,
-    exclude_chroots: &[String],
-    copr_state_file: &Path,
-    state_mutex: &Mutex<()>,
-    build_dir: &PathBuf,
-    target_os: Option<&str>,
+    build_key: &BuildKey, source: &Source, srpm_path: &PathBuf, copr_project: &str, exclude_chroots: &[String],
+    copr_state_file: &Path, state_mutex: &Mutex<()>, build_dir: &PathBuf, target_os: Option<&str>,
 ) -> Result<()> {
     // Repack SRPM with baked-in build parameters for Copr
     let final_srpm_path = if !source.params.is_empty() {
@@ -1724,10 +1495,7 @@ async fn build_with_copr(
 }
 
 async fn wait_for_copr_build(
-    build_id: u64,
-    build_key: &BuildKey,
-    copr_state_file: &Path,
-    state_mutex: &Mutex<()>,
+    build_id: u64, build_key: &BuildKey, copr_state_file: &Path, state_mutex: &Mutex<()>,
 ) -> Result<()> {
     info!("Waiting for Copr build {} to complete", build_id);
 
@@ -1792,12 +1560,8 @@ fn extract_copr_build_id(output: &str) -> Result<u64> {
 }
 
 async fn build_with_mock(
-    source: &Source,
-    all_dependencies: &HashMap<SourceKey, BuildHash>,
-    workspace: &Path,
-    build_dir: PathBuf,
-    build_subdir: PathBuf,
-    srpm_path: &PathBuf,
+    source: &Source, all_dependencies: &HashMap<SourceKey, BuildHash>, workspace: &Path, build_dir: PathBuf,
+    build_subdir: PathBuf, srpm_path: &PathBuf,
 ) -> Result<(), anyhow::Error> {
     let mut mock_cmd = vec![
         "mock".to_string(),
@@ -1825,12 +1589,8 @@ async fn build_with_mock(
 }
 
 async fn build_source_task(
-    build_key: BuildKey,
-    source: Source,
-    all_dependencies: HashMap<SourceKey, BuildHash>,
-    args: BuildArgs,
-    copr_state_mutex: std::sync::Arc<Mutex<()>>,
-    direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
+    build_key: BuildKey, source: Source, all_dependencies: HashMap<SourceKey, BuildHash>, args: BuildArgs,
+    copr_state_mutex: std::sync::Arc<Mutex<()>>, direct_dependency_receivers: Vec<(SourceKey, mpsc::Receiver<bool>)>,
     direct_completion_senders: Vec<mpsc::Sender<bool>>,
 ) -> Result<()> {
     info!("🚀 Starting build task");
@@ -1838,9 +1598,8 @@ async fn build_source_task(
     // Check if this source should be skipped based on copr_assume_built regex
     if let Some(pattern) = &args.copr_assume_built {
         if args.backend.is_remote() {
-            let regex = Regex::new(pattern).with_context(|| {
-                format!("Invalid regex pattern for copr_assume_built: {}", pattern)
-            })?;
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("Invalid regex pattern for copr_assume_built: {}", pattern))?;
 
             if regex.is_match(build_key.source_key.as_ref()) {
                 info!(
@@ -1880,11 +1639,7 @@ async fn build_source_task(
                 for sender in direct_completion_senders {
                     let _ = sender.send(false).await;
                 }
-                anyhow::bail!(
-                    "Dependency {} channel closed, cannot build {}",
-                    dep_key,
-                    build_key.source_key
-                );
+                anyhow::bail!("Dependency {} channel closed, cannot build {}", dep_key, build_key.source_key);
             }
         }
     }
@@ -1892,14 +1647,7 @@ async fn build_source_task(
     info!("🔨 All dependencies ready");
 
     // Use block_in_place to call the synchronous build_source function
-    let build_result = build_source(
-        &build_key,
-        &source,
-        &all_dependencies,
-        &args,
-        &*copr_state_mutex,
-    )
-    .await;
+    let build_result = build_source(&build_key, &source, &all_dependencies, &args, &*copr_state_mutex).await;
 
     // Determine success/failure and notify all waiting tasks
     let success = match &build_result {
@@ -1934,9 +1682,7 @@ async fn build_source_task(
 }
 
 fn compute_all_build_hashes(
-    sources: &[SourceKey],
-    spec_tree: &SpecTree,
-    source_hashes: &SourceHashes,
+    sources: &[SourceKey], spec_tree: &SpecTree, source_hashes: &SourceHashes,
 ) -> Result<HashMap<SourceKey, BuildHash>> {
     let mut build_hashes = HashMap::new();
     let mut visited = HashSet::new();
@@ -1944,12 +1690,7 @@ fn compute_all_build_hashes(
 
     for source_key in sources {
         let _ = compute_build_hash_recursive(
-            source_key,
-            spec_tree,
-            source_hashes,
-            &mut build_hashes,
-            &mut visited,
-            &mut recursion_stack,
+            source_key, spec_tree, source_hashes, &mut build_hashes, &mut visited, &mut recursion_stack,
         )?;
     }
 
@@ -1957,11 +1698,8 @@ fn compute_all_build_hashes(
 }
 
 fn compute_build_hash_recursive(
-    source_key: &SourceKey,
-    spec_tree: &SpecTree,
-    source_hashes: &SourceHashes,
-    build_hashes: &mut HashMap<SourceKey, BuildHash>,
-    visited: &mut HashSet<SourceKey>,
+    source_key: &SourceKey, spec_tree: &SpecTree, source_hashes: &SourceHashes,
+    build_hashes: &mut HashMap<SourceKey, BuildHash>, visited: &mut HashSet<SourceKey>,
     recursion_stack: &mut HashSet<SourceKey>,
 ) -> Result<BuildHash> {
     // Check for cycles - if this source is already in the recursion stack
@@ -1995,12 +1733,7 @@ fn compute_build_hash_recursive(
 
         // Recursively compute the dependency's build hash
         let dep_build_hash = compute_build_hash_recursive(
-            &actual_dep_key,
-            spec_tree,
-            source_hashes,
-            build_hashes,
-            visited,
-            recursion_stack,
+            &actual_dep_key, spec_tree, source_hashes, build_hashes, visited, recursion_stack,
         )?;
 
         dep_build_hashes.insert(actual_dep_key, dep_build_hash);
@@ -2024,24 +1757,15 @@ fn compute_build_hash_recursive(
 }
 
 fn copy_build_results_to_output_dir(
-    output_dir: &Path,
-    root_sources: &[SourceKey],
+    output_dir: &Path, root_sources: &[SourceKey],
     all_dependencies_map: &HashMap<SourceKey, HashMap<SourceKey, BuildHash>>,
-    build_hashes: &HashMap<SourceKey, BuildHash>,
-    workspace: &Path,
+    build_hashes: &HashMap<SourceKey, BuildHash>, workspace: &Path,
 ) -> Result<()> {
-    info!(
-        "Copying build results to output directory: {}",
-        output_dir.display()
-    );
+    info!("Copying build results to output directory: {}", output_dir.display());
 
     // Create output directory if it doesn't exist
-    std::fs::create_dir_all(output_dir).with_context(|| {
-        format!(
-            "Failed to create output directory: {}",
-            output_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
 
     // Collect all sources to copy: root sources and their dependencies
     let mut sources_to_copy = HashSet::new();
@@ -2066,11 +1790,7 @@ fn copy_build_results_to_output_dir(
 
         if source_build_dir.exists() {
             let dest_dir = output_dir.join(build_key.build_dir_name());
-            info!(
-                "Copying {} to {}",
-                source_build_dir.display(),
-                dest_dir.display()
-            );
+            info!("Copying {} to {}", source_build_dir.display(), dest_dir.display());
 
             // Copy the entire build directory
             copy_dir_all(&source_build_dir, &dest_dir).with_context(|| {
@@ -2118,10 +1838,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
     let spec_tree: SpecTree = serde_yaml::from_str(&yaml_content)
         .with_context(|| format!("Failed to parse spec file: {}", args.spec_file.display()))?;
 
-    info!(
-        "Successfully read YAML file with {} sources",
-        spec_tree.sources.len()
-    );
+    info!("Successfully read YAML file with {} sources", spec_tree.sources.len());
 
     // Verify all root sources exist
     if args.root_sources.is_empty() {
@@ -2165,18 +1882,14 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
 
     // Calculate source hashes for all sources
     let source_hashes = get_source_hashes(&args, &spec_tree, &all_sources)?;
-    info!(
-        "Calculated source hashes for {} sources",
-        source_hashes.hashes.len()
-    );
+    info!("Calculated source hashes for {} sources", source_hashes.hashes.len());
 
     // Calculate build hashes for all sources using recursion
     let build_hashes = compute_all_build_hashes(&all_sources, &spec_tree, &source_hashes)?;
     info!("Calculated build hashes for {} sources", build_hashes.len());
 
     // Create all_dependencies mapping: HashMap<SourceKey, HashMap<SourceKey, BuildHash>>
-    let mut all_dependencies_map: HashMap<SourceKey, HashMap<SourceKey, BuildHash>> =
-        HashMap::new();
+    let mut all_dependencies_map: HashMap<SourceKey, HashMap<SourceKey, BuildHash>> = HashMap::new();
 
     for source_key in &all_sources {
         // Get all dependencies for this source
@@ -2185,11 +1898,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
         // Create the dependency mapping with their build hashes
         let dependencies_with_hashes: HashMap<SourceKey, BuildHash> = source_deps
             .iter()
-            .filter_map(|dep_key| {
-                build_hashes
-                    .get(dep_key)
-                    .map(|hash| (dep_key.clone(), hash.clone()))
-            })
+            .filter_map(|dep_key| build_hashes.get(dep_key).map(|hash| (dep_key.clone(), hash.clone())))
             .collect();
 
         all_dependencies_map.insert(source_key.clone(), dependencies_with_hashes);
@@ -2202,10 +1911,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
         );
     }
 
-    info!(
-        "Created dependency mappings for {} sources",
-        all_dependencies_map.len()
-    );
+    info!("Created dependency mappings for {} sources", all_dependencies_map.len());
 
     // Log summary information
     for (source_key, deps) in &all_dependencies_map {
@@ -2214,10 +1920,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
 
     // Create channels for each dependency pair and organize by source
     let mut source_completion_senders: HashMap<SourceKey, Vec<mpsc::Sender<bool>>> = HashMap::new();
-    let mut source_dependency_receivers: HashMap<
-        SourceKey,
-        Vec<(SourceKey, mpsc::Receiver<bool>)>,
-    > = HashMap::new();
+    let mut source_dependency_receivers: HashMap<SourceKey, Vec<(SourceKey, mpsc::Receiver<bool>)>> = HashMap::new();
 
     // Initialize empty vectors for all sources
     for source_key in &all_sources {
@@ -2230,10 +1933,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
         let (tx, rx) = mpsc::channel::<bool>(1);
 
         // The dependency source gets the sender to notify when it completes
-        source_completion_senders
-            .get_mut(dependency)
-            .unwrap()
-            .push(tx);
+        source_completion_senders.get_mut(dependency).unwrap().push(tx);
 
         // The dependent source gets the receiver to wait for the dependency
         source_dependency_receivers
@@ -2241,10 +1941,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
             .unwrap()
             .push((dependency.clone(), rx));
 
-        info!(
-            "Created channel for dependency pair: {} -> {}",
-            dependency, dependent
-        );
+        info!("Created channel for dependency pair: {} -> {}", dependency, dependent);
     }
 
     // For each source, create the direct dependency receivers and completion senders
@@ -2253,19 +1950,12 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
     for source_key in &all_sources {
         let source = spec_tree.sources.get(source_key).unwrap().clone();
         let source_build_hash = build_hashes.get(source_key).unwrap().clone();
-        let source_deps = all_dependencies_map
-            .get(source_key)
-            .cloned()
-            .unwrap_or_default();
+        let source_deps = all_dependencies_map.get(source_key).cloned().unwrap_or_default();
 
         // Get dependency receivers for this source (to wait for dependencies)
-        let direct_dependency_receivers = source_dependency_receivers
-            .remove(source_key)
-            .unwrap_or_default();
+        let direct_dependency_receivers = source_dependency_receivers.remove(source_key).unwrap_or_default();
         // Get completion senders for this source (to notify dependents)
-        let direct_completion_senders = source_completion_senders
-            .remove(source_key)
-            .unwrap_or_default();
+        let direct_completion_senders = source_completion_senders.remove(source_key).unwrap_or_default();
 
         info!(
             "Source {} has {} dependency receivers and {} completion senders",
@@ -2283,12 +1973,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
             let key = task_source_key.clone();
             let task_build_key = BuildKey::new(task_source_key, source_build_hash);
             build_source_task(
-                task_build_key,
-                source,
-                source_deps,
-                task_args,
-                task_copr_state_mutex,
-                direct_dependency_receivers,
+                task_build_key, source, source_deps, task_args, task_copr_state_mutex, direct_dependency_receivers,
                 direct_completion_senders,
             )
             .instrument(span!(Level::INFO, "task", key = %key))
@@ -2356,11 +2041,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
     // Copy build results to output directory if specified
     if let Some(output_dir) = &args.output_dir {
         copy_build_results_to_output_dir(
-            output_dir,
-            &args.root_sources,
-            &all_dependencies_map,
-            &build_hashes,
-            &args.workspace,
+            output_dir, &args.root_sources, &all_dependencies_map, &build_hashes, &args.workspace,
         )?;
     }
 
@@ -2409,10 +2090,7 @@ async fn handle_clean_docker() -> Result<()> {
         }
     }
 
-    info!(
-        "✅ Cleanup complete. Removed {} Docker images",
-        removed_count
-    );
+    info!("✅ Cleanup complete. Removed {} Docker images", removed_count);
     Ok(())
 }
 
