@@ -319,7 +319,7 @@ struct BuildArgs {
         long,
         help = "Regex pattern for source keys to assume are already built in Copr (skip building)"
     )]
-    copr_assume_built: Option<String>,
+    assume_built: Option<String>,
 
     #[arg(
         long,
@@ -1595,26 +1595,24 @@ async fn build_source_task(
 ) -> Result<()> {
     info!("🚀 Starting build task");
 
-    // Check if this source should be skipped based on copr_assume_built regex
-    if let Some(pattern) = &args.copr_assume_built {
-        if args.backend.is_remote() {
-            let regex = Regex::new(pattern)
-                .with_context(|| format!("Invalid regex pattern for copr_assume_built: {}", pattern))?;
+    // Check if this source should be skipped based on assume_built regex
+    if let Some(pattern) = &args.assume_built {
+        let regex =
+            Regex::new(pattern).with_context(|| format!("Invalid regex pattern for assume_built: {}", pattern))?;
 
-            if regex.is_match(build_key.source_key.as_ref()) {
-                info!(
-                    "⏭️  Skipping build for {} (matches copr_assume_built pattern: {})",
-                    build_key.source_key, pattern
-                );
+        if regex.is_match(build_key.source_key.as_ref()) {
+            info!(
+                "⏭️  Skipping build for {} (matches assume_built pattern: {})",
+                build_key.source_key, pattern
+            );
 
-                // Notify all waiting tasks that this build is "complete"
-                for sender in direct_completion_senders {
-                    if let Err(e) = sender.send(true).await {
-                        error!("Failed to notify completion: {}", e);
-                    }
+            // Notify all waiting tasks that this build is "complete"
+            for sender in direct_completion_senders {
+                if let Err(e) = sender.send(true).await {
+                    error!("Failed to notify completion: {}", e);
                 }
-                return Ok(());
             }
+            return Ok(());
         }
     }
 

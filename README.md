@@ -151,7 +151,7 @@ spectree build packages.yaml /workspace app \
   --copr-project myproject \
   --copr-state-file builds.yaml \
   --exclude-chroot fedora-38-x86_64 \
-  --copr-assume-built "^(glibc|gcc|binutils).*"
+  --assume-built "^(glibc|gcc|binutils).*"
 ```
 
 Copr builds include:
@@ -258,17 +258,17 @@ Options:
       --target-os <TARGET_OS>
           Target OS for Docker backend (e.g., fedora-39, centos-stream-9)
 
-      --copr-project <Copr_PROJECT>
+      --copr-project <COPR_PROJECT>
           Copr project name (required for Copr backend)
 
-      --copr-state-file <Copr_STATE_FILE>
+      --copr-state-file <COPR_STATE_FILE>
           YAML file to store Copr build state mappings (required for Copr backend)
 
       --exclude-chroot <EXCLUDE_CHROOT>
           Exclude chroot for Copr builds (can be specified multiple times)
 
-      --copr-assume-built <Copr_ASSUME_BUILT>
-          Regex pattern for source keys to assume are already built in Copr (skip building)
+      --assume-built <COPR_ASSUME_BUILT>
+          Regex pattern for source keys to assume are already built (skip building)
 
       --debug-prepare
           Debug mode: only prepare sources (rpmbuild -bp) and leave them for inspection
